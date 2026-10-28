@@ -1,0 +1,23 @@
+{
+  "format": 1,
+  "components": {
+    "flipper": {
+      "path": "firmware/flipper",
+      "upstream": "https://github.com/DarkFlippers/unleashed-firmware.git",
+      "base_commit": "4c5e74cce3cef90e6d7865f5fd75e1b4a254a7f2",
+      "working_branch": "deepflipper"
+    },
+    "esp32": {
+      "path": "firmware/esp32",
+      "upstream": "https://github.com/78/xiaozhi-esp32.git",
+      "base_commit": "c435f99a88066029ec2dbd2d758c8cc9d051565b",
+      "working_branch": "deepflipper"
+    },
+    "server": {
+      "path": "server",
+      "upstream": "https://github.com/xinnan-tech/xiaozhi-esp32-server.git",
+      "base_commit": "f1965167cc2993556cd3e963f8657e2686006c77",
+      "working_branch": "deepflipper"
+    }
+  }
+}

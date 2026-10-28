@@ -1,0 +1,17 @@
+.tools/
+build/
+.venv/
+__pycache__/
+*.pyc
+*.log
+*.token
+*.secret
+.env
+.env.*
+!.env.example
+firmware/flipper/toolchain/
+firmware/flipper/build/
+firmware/flipper/dist/
+firmware/esp32/build/
+firmware/esp32/managed_components/
+server/main/xiaozhi-server/data/
