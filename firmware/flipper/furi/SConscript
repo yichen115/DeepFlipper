@@ -1,0 +1,18 @@
+Import("env")
+
+env.Append(
+    LINT_SOURCES=[
+        Dir("."),
+    ]
+)
+
+
+libenv = env.Clone(FW_LIB_NAME="furi")
+libenv.ApplyLibFlags()
+libenv.AppendUnique(CCFLAGS=["-fno-lto"])  # Naked crash handlers use assembler literal pools.
+
+sources = libenv.GlobRecursive("*.c")
+
+lib = libenv.StaticLibrary("${FW_LIB_NAME}", sources)
+libenv.Install("${LIB_DIST_DIR}", lib)
+Return("lib")

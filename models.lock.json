@@ -1,0 +1,36 @@
+{
+  "format": 1,
+  "purpose": "CPU local voice server: SenseVoice ASR and Silero VAD",
+  "files": [
+    {
+      "path": "server/main/xiaozhi-server/models/SenseVoiceSmall/model.pt",
+      "url": "https://modelscope.cn/models/iic/SenseVoiceSmall/resolve/master/model.pt",
+      "sha256": "833ca2dcfdf8ec91bd4f31cfac36d6124e0c459074d5e909aec9cabe6204a3ea",
+      "bytes": 936291369
+    },
+    {
+      "path": "server/main/xiaozhi-server/models/SenseVoiceSmall/config.yaml",
+      "url": "https://raw.githubusercontent.com/xinnan-tech/xiaozhi-esp32-server/f1965167cc2993556cd3e963f8657e2686006c77/main/xiaozhi-server/models/SenseVoiceSmall/config.yaml",
+      "sha256": "f71e239ba36705564b5bf2d2ffd07eece07b8e3f2bbf6d2c99d8df856339ac19",
+      "bytes": 1855
+    },
+    {
+      "path": "server/main/xiaozhi-server/models/SenseVoiceSmall/configuration.json",
+      "url": "https://raw.githubusercontent.com/xinnan-tech/xiaozhi-esp32-server/f1965167cc2993556cd3e963f8657e2686006c77/main/xiaozhi-server/models/SenseVoiceSmall/configuration.json",
+      "sha256": "02810a7f8e9e8aee10370a265f7e799728ce25b4c00cdbf4602b303ee395a38e",
+      "bytes": 396
+    },
+    {
+      "path": "server/main/xiaozhi-server/models/SenseVoiceSmall/chn_jpn_yue_eng_ko_spectok.bpe.model",
+      "url": "https://raw.githubusercontent.com/xinnan-tech/xiaozhi-esp32-server/f1965167cc2993556cd3e963f8657e2686006c77/main/xiaozhi-server/models/SenseVoiceSmall/chn_jpn_yue_eng_ko_spectok.bpe.model",
+      "sha256": "aa87f86064c3730d799ddf7af3c04659151102cba548bce325cf06ba4da4e6a8",
+      "bytes": 377341
+    },
+    {
+      "path": "server/main/xiaozhi-server/models/snakers4_silero-vad/src/silero_vad/data/silero_vad.onnx",
+      "url": "https://raw.githubusercontent.com/xinnan-tech/xiaozhi-esp32-server/f1965167cc2993556cd3e963f8657e2686006c77/main/xiaozhi-server/models/snakers4_silero-vad/src/silero_vad/data/silero_vad.onnx",
+      "sha256": "2623a2953f6ff3d2c1e61740c6cdb7168133479b267dfef114a4a3cc5bdd788f",
+      "bytes": 2327524
+    }
+  ]
+}

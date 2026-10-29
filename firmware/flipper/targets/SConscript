@@ -1,0 +1,22 @@
+Import("env")
+
+env.Append(
+    LINT_SOURCES=[Dir(".")],
+)
+
+libenv = env.Clone(FW_LIB_NAME="flipper${TARGET_HW}")
+libenv.Append(
+    CPPPATH=[
+        "#/lib/stm32wb_copro/wpan/interface/patterns/ble_thread/tl",
+    ]
+)
+libenv.ApplyLibFlags()
+libenv.AppendUnique(CCFLAGS=["-fno-lto"])  # Reset/interrupt code uses assembler literal pools.
+
+
+lib = libenv.StaticLibrary(
+    "${FW_LIB_NAME}",
+    env.get("TARGET_CFG").gatherSources(),
+)
+libenv.Install("${LIB_DIST_DIR}", lib)
+Return("lib")

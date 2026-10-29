@@ -34,6 +34,12 @@ class JobTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(result)['code'],'timeout')
         self.assertIn('flipper_job_cancel',calls)
 
+    async def test_boolean_job_is_not_a_task_id(self):
+        async def call(*args):
+            self.fail('invalid job must not be polled')
+        result = await module.await_flipper_job('{"job":true,"state":"pending"}', call)
+        self.assertEqual(json.loads(result)['code'], 'module_busy')
+
     async def test_completed_errors_are_not_replaced_by_success(self):
         async def call(*args):
             return '{"ok":false,"code":"busy"}'

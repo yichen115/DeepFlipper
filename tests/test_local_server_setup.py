@@ -18,7 +18,11 @@ class LocalSetupTests(unittest.TestCase):
             template.write_text('url: ws://REPLACE_WITH_PC_IP:8000/xiaozhi/v1/\n', encoding='utf-8')
             config, key = setup.prepare('192.168.1.12', root)
             secret = key.read_bytes()
-            self.assertEqual(len(secret.strip().split(b'=', 1)[1]), 64)
+            values = dict(line.split(b'=', 1) for line in secret.splitlines() if b'=' in line)
+            self.assertEqual(len(values[b'DEEPFLIPPER_AUTH_KEY']), 64)
+            self.assertEqual(len(values[b'DEEPFLIPPER_ADMIN_TOKEN']), 64)
+            self.assertEqual((config.parent / 'admin-token.txt').read_text().strip().encode(),
+                             values[b'DEEPFLIPPER_ADMIN_TOKEN'])
             self.assertIn('ws://192.168.1.12:8000', config.read_text(encoding='utf-8'))
             config.write_text('custom: user-settings\n', encoding='utf-8')
             setup.prepare('192.168.1.13', root)

@@ -4,8 +4,8 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $firmwareRoot = Join-Path $projectRoot 'firmware/flipper'
 Push-Location $projectRoot
 try {
-    git -C $firmwareRoot submodule update --init --recursive --jobs 8
-    if($LASTEXITCODE -ne 0) { throw 'Flipper submodule initialization failed' }
+    python scripts/fetch_dependencies.py
+    if($LASTEXITCODE -ne 0) { throw 'Flipper dependency download/check failed' }
     python scripts/sync_protocol.py
     if($LASTEXITCODE -ne 0) { throw 'Protocol synchronization failed' }
     python scripts/export_flipper_assets.py

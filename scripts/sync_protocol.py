@@ -1,4 +1,4 @@
-"""Install our versioned RPC extension into the copied protobuf submodule."""
+"""Install our versioned RPC extension into the downloaded protobuf sources."""
 from pathlib import Path
 import shutil
 
@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 target = ROOT / 'firmware/flipper/assets/protobuf'
 main = target / 'flipper.proto'
 if not main.is_file():
-    raise SystemExit('Initialize firmware/flipper submodules first.')
+    raise SystemExit('Missing firmware/flipper/assets/protobuf/flipper.proto; run python scripts/fetch_dependencies.py first.')
 text = main.read_text(encoding='utf-8')
 for tag, name in ((500, 'deepflipper_request'), (501, 'deepflipper_response')):
     import re

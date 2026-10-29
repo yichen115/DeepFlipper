@@ -1,0 +1,9 @@
+App(
+    appid="deepflipper_settings",
+    name="AI Assistant",
+    apptype=FlipperAppType.SETTINGS,
+    entry_point="deepflipper_settings_app",
+    requires=["gui", "deepflipper_start"],
+    stack_size=2 * 1024,
+    order=55,
+)

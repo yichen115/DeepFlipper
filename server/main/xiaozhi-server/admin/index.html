@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DeepFlipper · 控制台</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header><a class="brand" href="/">DF<span>DeepFlipper<small>鲸鱼娘 · 本地控制台</small></span></a><div id="runtime" class="badge">连接中</div></header>
+  <main>
+    <section id="login-card" class="card narrow">
+      <p class="eyebrow">欢迎回来</p><h1>连接你的鲸鱼娘</h1>
+      <p>输入首次准备环境时生成的管理口令。它位于本机 <code>server/main/xiaozhi-server/data/admin-token.txt</code>，与设备 Token 不同。</p>
+      <form id="login-form"><label for="admin-token">管理口令</label><input id="admin-token" type="password" autocomplete="current-password" required><button type="submit">进入控制台</button></form>
+    </section>
+    <section id="console" hidden>
+      <div class="intro"><div><p class="eyebrow">你的声音，你的伙伴</p><h1>设置好模型，开始对话。</h1><p>所有设置由当前 Python 服务管理，无需额外后台。</p></div><button id="logout" class="quiet" type="button">退出登录</button></div>
+      <nav aria-label="设置分类"><button class="tab active" data-panel="model-panel" type="button">模型设置</button><button class="tab" data-panel="prompt-panel" type="button">提示词与工具</button><button class="tab" data-panel="device-panel" type="button">设备连接</button></nav>
+      <section id="model-panel" class="panel">
+        <div class="grid">
+          <article class="card"><h2>对话模型</h2><p>支持 DeepSeek 和 OpenAI 兼容接口。选择支持工具调用的模型，才能操作 Flipper。</p>
+            <label for="base-url">API Base URL</label><input id="base-url" type="url" placeholder="https://api.deepseek.com" maxlength="512">
+            <label for="model-name">模型名称</label><input id="model-name" placeholder="填写服务商提供的模型 ID" maxlength="128">
+            <div class="label-row"><label for="api-key">API Key</label><small id="key-state">尚未配置</small></div><input id="api-key" type="password" autocomplete="new-password" placeholder="留空保留当前密钥" maxlength="4096">
+            <label class="check"><input id="clear-key" type="checkbox">清除已保存的 API Key</label>
+            <button id="test-model" class="secondary" type="button">测试接口与工具调用</button><small class="note">测试会向模型发送一次简短请求，不执行任何硬件操作。</small>
+          </article>
+          <aside class="card"><h2>语音链路</h2><dl><dt>语音识别</dt><dd id="asr-name">—</dd><dt>语音合成</dt><dd id="tts-name">—</dd></dl><label for="tts-voice">EdgeTTS 音色</label><input id="tts-voice" placeholder="zh-CN-XiaoxiaoNeural" maxlength="128"><p>默认在电脑上运行语音识别，DeepSeek 与 EdgeTTS 需要联网。设备音量和麦克风开关在 Flipper 上设置。</p><div class="callout">API Key 保存在本机配置中，页面只显示是否已配置，不会读回密钥。</div></aside>
+        </div>
+      </section>
+      <section id="prompt-panel" class="panel" hidden>
+        <article class="card"><h2>鲸鱼娘的系统提示词</h2><p>设定角色、说话风格和回答习惯。提示词决定行为规则，MCP 工具定义决定实际能力。</p><label for="prompt">系统提示词</label><textarea id="prompt" rows="8" maxlength="16000"></textarea></article>
+        <article class="card"><h2>当前实现的 Flipper 工具</h2><p>下列能力由 ESP32 和 Flipper 代码实现。设备连接后实际通过 MCP 上报工具列表；增加提示词不会新增硬件能力。</p><label class="check"><input id="tool-calling" type="checkbox">允许模型调用设备上报的工具</label><div id="tools" class="tool-list"></div><details><summary>自动附加的工具使用规则</summary><pre id="tool-policy"></pre></details></article>
+      </section>
+      <section id="device-panel" class="panel" hidden>
+        <div class="grid"><article class="card"><h2>连接 ESP32</h2><label for="voice-url">填入 Flipper 的 Server URL</label><input id="voice-url" readonly><p>ESP32 接入与电脑互通的 Wi-Fi。设备 Token 绑定 Device ID 和 Client ID，可在 Flipper 的 AI Assistant 设置查看。</p><h3>已连接设备</h3><div id="devices" class="device-list">暂无连接</div></article>
+          <article class="card"><h2>签发设备 Token</h2><p>这是 ESP32 连接语音服务的凭据，不是 API Key，也不是管理口令。</p><form id="device-form"><label for="device-id">Device ID</label><input id="device-id" maxlength="80" required><label for="client-id">Client ID</label><input id="client-id" maxlength="80" required><button type="submit">签发 Token</button></form><div id="issued" hidden><label for="device-token">将此 Token 填入 Flipper</label><textarea id="device-token" rows="3" readonly></textarea><small id="expires"></small><button id="copy-token" class="secondary" type="button">复制 Token</button></div></article></div>
+      </section>
+      <footer class="save-bar"><span>应用设置会重连设备，当前对话将结束。</span><button id="save" type="button">保存并应用</button></footer>
+    </section>
+    <div id="message" role="status" aria-live="polite" hidden></div>
+  </main>
+</body>
+</html>

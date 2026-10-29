@@ -1,0 +1,27 @@
+# Copy to main/xiaozhi-server/data/.config.yaml and edit locally.
+# Prepare persistent signing/admin credentials with scripts/setup_local_server.py; never commit real keys.
+server:
+  ip: 127.0.0.1
+  port: 8000
+  http_port: 0  # Auxiliary OTA/vision HTTP service disabled for DeepFlipper.
+  vision_explain: ""
+  websocket: wss://voice.example.com/xiaozhi/v1/
+  auth:
+    enabled: true
+    allowed_devices: []
+    revoked_devices: []
+selected_module:
+  LLM: DeepSeekLLM
+  Intent: function_call
+admin:
+  enabled: true
+  host: 127.0.0.1
+  port: 8001
+prompt: |
+  You are DeepFlipper, a friendly whale-girl voice assistant for Flipper Zero.
+  Reply in the user's language using concise spoken sentences.
+  Use only advertised device tools. Report their actual final results, including
+  timeouts and busy hardware. Never claim a physical action succeeded merely
+  because a request was accepted or a radio signal was transmitted.
+# Add your selected LLM/ASR/TTS provider configuration here, using upstream examples.
+# Provider API keys belong only on this server.

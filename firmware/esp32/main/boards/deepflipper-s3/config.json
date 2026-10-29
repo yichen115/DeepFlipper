@@ -1,0 +1,16 @@
+{
+  "type": "deepflipper-s3",
+  "target": "esp32s3",
+  "builds": [{
+    "name": "deepflipper-s3",
+    "sdkconfig_append": [
+      "CONFIG_SPIRAM=y",
+      "CONFIG_SPIRAM_MODE_OCT=y",
+      "CONFIG_FLASH_NONE_ASSETS=y",
+      "CONFIG_WAKE_WORD_DISABLED=y",
+      "CONFIG_USE_AUDIO_PROCESSOR=n",
+      "CONFIG_USE_DEVICE_AEC=n",
+      "CONFIG_USE_SERVER_AEC=n"
+    ]
+  }]
+}

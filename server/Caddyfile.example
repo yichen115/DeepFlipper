@@ -1,0 +1,10 @@
+# Replace with your own host. Caddy terminates TLS and proxies WebSocket upgrades.
+voice.example.com {
+    handle /xiaozhi/v1/* {
+        reverse_proxy 127.0.0.1:8000
+    }
+    # Auxiliary OTA/vision HTTP is disabled by default (http_port: 0).
+    handle {
+        respond "Not found" 404
+    }
+}

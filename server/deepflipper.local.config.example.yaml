@@ -1,0 +1,46 @@
+# Generated setup copies this into main/xiaozhi-server/data/.config.yaml.
+# Defaults not listed here are merged from the upstream config.yaml.
+server:
+  ip: 0.0.0.0
+  port: 8000
+  http_port: 0  # Auxiliary OTA/vision HTTP service disabled for DeepFlipper.
+  vision_explain: ""
+  websocket: ws://REPLACE_WITH_PC_IP:8000/xiaozhi/v1/
+  auth:
+    enabled: true
+    allowed_devices: []
+    revoked_devices: []
+selected_module:
+  VAD: SileroVAD
+  ASR: FunASR
+  LLM: DeepSeekLLM
+  TTS: EdgeTTS
+  Memory: nomem
+  Intent: function_call
+admin:
+  enabled: true
+  host: 127.0.0.1
+  port: 8001
+LLM:
+  DeepSeekLLM:
+    type: openai
+    base_url: https://api.deepseek.com
+    model_name: REPLACE_WITH_YOUR_DEEPSEEK_MODEL
+    api_key: REPLACE_WITH_YOUR_DEEPSEEK_API_KEY
+    max_tokens: 500
+ASR:
+  FunASR:
+    language: zh
+TTS:
+  EdgeTTS:
+    voice: zh-CN-XiaoxiaoNeural
+Intent:
+  function_call:
+    type: function_call
+    functions: []
+prompt: |
+  You are DeepFlipper, a friendly whale-girl voice assistant for Flipper Zero.
+  Reply in the user's language using concise spoken sentences.
+  Use only advertised device tools and report their actual final results.
+  Never claim an action succeeded just because the request was accepted.
+

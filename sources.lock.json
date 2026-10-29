@@ -1,23 +1,203 @@
 {
-  "format": 1,
+  "format": 2,
   "components": {
     "flipper": {
       "path": "firmware/flipper",
       "upstream": "https://github.com/DarkFlippers/unleashed-firmware.git",
       "base_commit": "4c5e74cce3cef90e6d7865f5fd75e1b4a254a7f2",
-      "working_branch": "deepflipper"
+      "storage": "project-source",
+      "dependencies": [
+        {
+          "path": "applications/main/subghz_remote",
+          "commit": "df6334cdde0c88e22ab09ba16b12222cfccf834a",
+          "upstream": "https://github.com/DarkFlippers/SubGHz_Remote.git",
+          "archive": "https://codeload.github.com/DarkFlippers/SubGHz_Remote/tar.gz/df6334cdde0c88e22ab09ba16b12222cfccf834a",
+          "required": [
+            "application.fam",
+            "subghz_remote_app.c"
+          ],
+          "sha256": "15066aeeff13ab36532b1b2c54a9136390d978515772e7f77ee7f50ace5fce71"
+        },
+        {
+          "path": "assets/protobuf",
+          "commit": "d827357e8bc3dc68d73158998e9fa52509f30836",
+          "upstream": "https://github.com/DarkFlippers/flipperzero-protobuf.git",
+          "archive": "https://codeload.github.com/DarkFlippers/flipperzero-protobuf/tar.gz/d827357e8bc3dc68d73158998e9fa52509f30836",
+          "required": [
+            "flipper.proto",
+            "Changelog"
+          ],
+          "sha256": "767e3ec7e9afd5c5e208ed7e2aee4bd75d821c4d6bf59a21c6cfd76b5dd0062e"
+        },
+        {
+          "path": "lib/FreeRTOS-Kernel",
+          "commit": "def7d2df2b0506d3d249334974f51e427c17a41c",
+          "upstream": "https://github.com/FreeRTOS/FreeRTOS-Kernel.git",
+          "archive": "https://codeload.github.com/FreeRTOS/FreeRTOS-Kernel/tar.gz/def7d2df2b0506d3d249334974f51e427c17a41c",
+          "required": [
+            "include/FreeRTOS.h",
+            "tasks.c"
+          ],
+          "sha256": "0196ed0e0ed3e2fdba0cd1ae6d581147395b0e502b5c3a5dfc8ee84722b4a623"
+        },
+        {
+          "path": "lib/FreeRTOS-Kernel/portable/ThirdParty/Community-Supported-Ports",
+          "commit": "4273ca3211b99914f31518378fb590fbff064953",
+          "upstream": "https://github.com/FreeRTOS/FreeRTOS-Kernel-Community-Supported-Ports.git",
+          "archive": "https://codeload.github.com/FreeRTOS/FreeRTOS-Kernel-Community-Supported-Ports/tar.gz/4273ca3211b99914f31518378fb590fbff064953",
+          "required": [
+            "README.md"
+          ],
+          "sha256": "220dab2afc35c584c343e4a11f643804b33eb94fde0462f48b537ccf494567ce"
+        },
+        {
+          "path": "lib/FreeRTOS-Kernel/portable/ThirdParty/Partner-Supported-Ports",
+          "commit": "3f9c99a682c5c796bb7eb89fd9c4385688fce27a",
+          "upstream": "https://github.com/FreeRTOS/FreeRTOS-Kernel-Partner-Supported-Ports.git",
+          "archive": "https://codeload.github.com/FreeRTOS/FreeRTOS-Kernel-Partner-Supported-Ports/tar.gz/3f9c99a682c5c796bb7eb89fd9c4385688fce27a",
+          "required": [
+            "README.md"
+          ],
+          "sha256": "3ff84c3cd9397969803acfdc2cf8b41554b582cdca7c1fd1489d7638ae598326"
+        },
+        {
+          "path": "lib/heatshrink",
+          "commit": "7398ccc91652a33483245200cfa1a83b073bc206",
+          "upstream": "https://github.com/flipperdevices/heatshrink.git",
+          "archive": "https://codeload.github.com/flipperdevices/heatshrink/tar.gz/7398ccc91652a33483245200cfa1a83b073bc206",
+          "required": [
+            "heatshrink_encoder.c",
+            "heatshrink_decoder.c"
+          ],
+          "sha256": "ab17acc70a457fd860fed5ebc23ff543d5f2a70d83b788d05124ed065929eec5"
+        },
+        {
+          "path": "lib/libusb_stm32",
+          "commit": "6ca2857519f996244f7b324dd227fdf0a075fffb",
+          "upstream": "https://github.com/flipperdevices/libusb_stm32.git",
+          "archive": "https://codeload.github.com/flipperdevices/libusb_stm32/tar.gz/6ca2857519f996244f7b324dd227fdf0a075fffb",
+          "required": [
+            "readme.md",
+            "LICENSE"
+          ],
+          "sha256": "f9ed154fbd4b0210cef00d9340a00a8af4b84384a6850bb541baaa1d694553bf"
+        },
+        {
+          "path": "lib/mbedtls",
+          "commit": "107ea89daaefb9867ea9121002fbbdf926780e98",
+          "upstream": "https://github.com/Mbed-TLS/mbedtls.git",
+          "archive": "https://codeload.github.com/Mbed-TLS/mbedtls/tar.gz/107ea89daaefb9867ea9121002fbbdf926780e98",
+          "required": [
+            "include/mbedtls/ssl.h",
+            "library/ssl_tls.c"
+          ],
+          "sha256": "7dc3219b00ab2d33d5108a6cfb1b6d11c1476f882493acdf0be5bcc9a181336b"
+        },
+        {
+          "path": "lib/mbedtls/framework",
+          "commit": "94599c0e3b5036e086446a51a3f79640f70f22f6",
+          "upstream": "https://github.com/Mbed-TLS/mbedtls-framework.git",
+          "archive": "https://codeload.github.com/Mbed-TLS/mbedtls-framework/tar.gz/94599c0e3b5036e086446a51a3f79640f70f22f6",
+          "required": [
+            "CMakeLists.txt",
+            "README.md"
+          ],
+          "sha256": "632d5aa4dd2e4179f9d648be12af9a9c3158d7f503a93e70e651751b5f31257c"
+        },
+        {
+          "path": "lib/microtar",
+          "commit": "1e921369b2c92bb219fcef84a37d4d2347794c0f",
+          "upstream": "https://github.com/amachronic/microtar.git",
+          "archive": "https://codeload.github.com/amachronic/microtar/tar.gz/1e921369b2c92bb219fcef84a37d4d2347794c0f",
+          "required": [
+            "mtar.c",
+            "README.md"
+          ],
+          "sha256": "87334f082eaa08f81d921bd616b5f3da6ca86d58adc650afc1aa14c95296eee3"
+        },
+        {
+          "path": "lib/mlib",
+          "commit": "62c8ac3e5d4a7a4f8757328e7a80286fde2686b6",
+          "upstream": "https://github.com/P-p-H-d/mlib.git",
+          "archive": "https://codeload.github.com/P-p-H-d/mlib/tar.gz/62c8ac3e5d4a7a4f8757328e7a80286fde2686b6",
+          "required": [
+            "m-core.h",
+            "m-array.h"
+          ],
+          "sha256": "c2a5966813647ad744425e94d9de5bb0ad008e73a62735fd25daabff7d19b083"
+        },
+        {
+          "path": "lib/nanopb",
+          "commit": "6cfe48d6f1593f8fa5c0f90437f5e6522587745e",
+          "upstream": "https://github.com/nanopb/nanopb.git",
+          "archive": "https://codeload.github.com/nanopb/nanopb/tar.gz/6cfe48d6f1593f8fa5c0f90437f5e6522587745e",
+          "required": [
+            "pb.h",
+            "pb_common.c"
+          ],
+          "sha256": "556899aeba86a151a0c27b85234cc1918b8278d90d482aaeb58207da5720dd4a"
+        },
+        {
+          "path": "lib/stm32wb_cmsis",
+          "commit": "d1b860584dfe24d40d455ae624ed14600dfa93c9",
+          "upstream": "https://github.com/STMicroelectronics/cmsis_device_wb.git",
+          "archive": "https://codeload.github.com/STMicroelectronics/cmsis_device_wb/tar.gz/d1b860584dfe24d40d455ae624ed14600dfa93c9",
+          "required": [
+            "Include/stm32wb55xx.h",
+            "README.md"
+          ],
+          "sha256": "d4f034af0966670a5dbd7330a9c1ea6fa217027bb887090e22eb90c1569075cf"
+        },
+        {
+          "path": "lib/stm32wb_copro",
+          "commit": "133182d5583e998bb263cd947105be4df9c29cb3",
+          "upstream": "https://github.com/flipperdevices/stm32wb_copro.git",
+          "archive": "https://codeload.github.com/flipperdevices/stm32wb_copro/tar.gz/133182d5583e998bb263cd947105be4df9c29cb3",
+          "required": [
+            "VERSION"
+          ],
+          "sha256": "6e6796a380ec2f33bf92a01b824934632a44c286d871ad25434739ae0b3725c6"
+        },
+        {
+          "path": "lib/stm32wb_copro/scripts",
+          "commit": "781464e628eb694b4c98a79ab524c293f527fc8d",
+          "upstream": "https://github.com/flipperdevices/stm32wb_copro_scripts.git",
+          "archive": "https://codeload.github.com/flipperdevices/stm32wb_copro_scripts/tar.gz/781464e628eb694b4c98a79ab524c293f527fc8d",
+          "required": [
+            "checkout.py",
+            "config.json"
+          ],
+          "sha256": "cb496785b9a829c7b19720534e6cf5ce6afdced91a655c263d103a3d5c158adf"
+        },
+        {
+          "path": "lib/stm32wb_hal",
+          "commit": "cfd0dd258cb031c95b2b2d6d04c19f9f625fe3e8",
+          "upstream": "https://github.com/STMicroelectronics/stm32wbxx_hal_driver.git",
+          "archive": "https://codeload.github.com/STMicroelectronics/stm32wbxx_hal_driver/tar.gz/cfd0dd258cb031c95b2b2d6d04c19f9f625fe3e8",
+          "required": [
+            "Inc/stm32wbxx_hal.h",
+            "README.md"
+          ],
+          "sha256": "8d17b5671f5541f6fecd64045f8ffc2887574c9d23c8edbd53e14351dbf1cf67"
+        }
+      ],
+      "dependency_storage": "download-on-demand"
     },
     "esp32": {
       "path": "firmware/esp32",
       "upstream": "https://github.com/78/xiaozhi-esp32.git",
       "base_commit": "c435f99a88066029ec2dbd2d758c8cc9d051565b",
-      "working_branch": "deepflipper"
+      "storage": "project-source"
     },
     "server": {
       "path": "server",
       "upstream": "https://github.com/xinnan-tech/xiaozhi-esp32-server.git",
       "base_commit": "f1965167cc2993556cd3e963f8657e2686006c77",
-      "working_branch": "deepflipper"
+      "storage": "project-source",
+      "included_modules": [
+        "main/xiaozhi-server"
+      ]
     }
-  }
+  },
+  "repository_layout": "single-repository"
 }

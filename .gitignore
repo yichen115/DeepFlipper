@@ -1,17 +1,150 @@
-.tools/
-build/
+# Project tools, build output and release packages
+/.tools/
+/build/
+
+# Python environments, bytecode and test caches
 .venv/
+venv/
 __pycache__/
-*.pyc
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Local logs and editor/OS files
 *.log
+*.log.*
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
+
+# Local credentials. Keep documented templates available for version control.
 *.token
 *.secret
 .env
 .env.*
 !.env.example
-firmware/flipper/toolchain/
-firmware/flipper/build/
-firmware/flipper/dist/
-firmware/esp32/build/
-firmware/esp32/managed_components/
-server/main/xiaozhi-server/data/
+!.env.*.example
+!.env.template
+.config.yaml
+.secrets.yaml
+.private_config.yaml
+server.env
+device-token*.txt
+admin-token*.txt
+
+# Flipper generated files (retain source assets, including whale_frames.bin)
+/firmware/flipper/toolchain/
+/firmware/flipper/build/
+/firmware/flipper/dist/
+/firmware/flipper/assets/compiled/
+/firmware/flipper/fbt_options_local.py
+.sconsign.dblite
+compile_commands.json
+
+# ESP-IDF outputs. sdkconfig.defaults* and board config.json remain source files.
+/firmware/esp32/build/
+/firmware/esp32/dist/
+/firmware/esp32/releases/
+/firmware/esp32/managed_components/
+/firmware/esp32/sdkconfig
+/firmware/esp32/sdkconfig.old
+/firmware/esp32/dependencies.lock
+/firmware/esp32/main/assets/lang_config.h
+/firmware/esp32/main/mmap_generate_*.h
+
+# Upstream issue/support metadata; DeepFlipper can own a root .github/ separately.
+# Keep workflow sources: ESP32 build/CI selection scripts reference build.yml.
+/firmware/esp32/.github/ISSUE_TEMPLATE/
+/firmware/esp32/.github/SUPPORT.md
+/firmware/flipper/.github/ISSUE_TEMPLATE/
+/firmware/flipper/.github/CODEOWNERS
+/firmware/flipper/.github/FUNDING.yml
+/firmware/flipper/.github/labeler.yml
+/firmware/flipper/.github/pull_request_template.md
+
+# Backend runtime data, private audio and downloaded ASR weights
+/server/main/xiaozhi-server/data/
+/server/main/xiaozhi-server/tmp/
+/server/main/xiaozhi-server/audio_ref/
+/server/main/xiaozhi-server/mysql/
+/server/main/xiaozhi-server/asr-models/
+/server/asr-models/
+/server/audio_ref/
+/server/uploadfile/
+
+# Optional upstream web/Java components
+node_modules/
+/server/main/manager-web/dist/
+/server/main/manager-web/coverage/
+/server/main/manager-api/target/
+
+# Downloaded Flipper dependencies: exact revisions/URLs are in sources.lock.json.
+/firmware/flipper/applications/main/subghz_remote/
+/firmware/flipper/assets/protobuf/
+/firmware/flipper/lib/FreeRTOS-Kernel/
+/firmware/flipper/lib/FreeRTOS-Kernel/portable/ThirdParty/Community-Supported-Ports/
+/firmware/flipper/lib/FreeRTOS-Kernel/portable/ThirdParty/Partner-Supported-Ports/
+/firmware/flipper/lib/heatshrink/
+/firmware/flipper/lib/libusb_stm32/
+/firmware/flipper/lib/mbedtls/
+/firmware/flipper/lib/mbedtls/framework/
+/firmware/flipper/lib/microtar/
+/firmware/flipper/lib/mlib/
+/firmware/flipper/lib/nanopb/
+/firmware/flipper/lib/stm32wb_cmsis/
+/firmware/flipper/lib/stm32wb_copro/
+/firmware/flipper/lib/stm32wb_copro/scripts/
+/firmware/flipper/lib/stm32wb_hal/
+
+# Model weights and caches are downloaded, never committed.
+models/
+pretrained_models/
+.huggingface/
+.hf_cache/
+/server/main/xiaozhi-server/models/
+/server/main/digital-human/resources/
+/server/main/digital-human/wakeword_runtime/models/
+/server/main/manager-web/public/generator/static/wakenet_model/
+/server/main/manager-web/public/generator/static/multinet_model/
+*.onnx
+*.pt
+*.pth
+*.tflite
+*.safetensors
+*.ckpt
+*.jit
+*.espdl
+*.gguf
+*.ggml
+*.h5
+*.hdf5
+
+# Removed upstream docs and unused ESP32 screen font-generator assets.
+/server/docs/
+/server/main/manager-web/public/generator/static/fonts/
+
+# Retired prebuilt screen-resource generator.
+/server/main/manager-web/public/generator/
+
+# Removed upstream management/demo modules and deployment variants.
+/server/main/manager-api/
+/server/main/manager-web/
+/server/main/manager-mobile/
+/server/main/digital-human/
+/server/.github/
+/server/docker/
+/server/Dockerfile-web
+/server/Dockerfile-server
+/server/Dockerfile-server-base
+/server/main/xiaozhi-server/config_from_api.yaml
+/server/main/xiaozhi-server/docker-compose.yml
+/server/main/xiaozhi-server/docker-compose_all.yml

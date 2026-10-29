@@ -64,6 +64,9 @@ test_count=int(re.search(r'^Ran (\d+) tests?',test_log,re.M)[1])
 assert re.search(r'^OK\s*$',test_log,re.M), 'Project tests did not pass'
 native_log=(ROOT/'build-native.log').read_text(encoding='utf-8',errors='replace')
 assert 'PASS: C++ RPC codec' in native_log
+assert 'PASS: native RPC streaming' in native_log
+assert 'PASS: native action workflows' in native_log
+assert 'PASS: Expansion 460800 negotiation' in native_log
 esp_report={'target_sdk':'release/v6.1','target_build':'not exported','hardware_validated':False}
 esp_release=ROOT/'build/release/esp32'
 esp_result=ROOT/'build/esp32-build-result.json'
@@ -104,10 +107,23 @@ report={
     'assets':{'animations':12,'sequence_frames':frames,'unique_frames':manifest['unique_frame_count'],
               'bytes':len(raw),'per_frame_logo_preserved':True},
     'tests':{'project_python':f'{test_count} passed','native_rpc_codec':'passed',
+             'native_actions':'passed; simulated transport, not physical hardware',
+             'expansion_baud_fallback':'passed; simulated peer, not electrical validation',
              'relevant_upstream_board_tests':'9 passed',
              'broader_upstream_host_run':'140 run; 12 Windows environment errors; 19 skipped'},
     'esp32':esp_report,
     'references_unchanged':True,
 }
+selected_board_log=ROOT/'firmware/esp32/build-selected-board-tests.log'
+if selected_board_log.is_file():
+    selected=selected_board_log.read_text(encoding='utf-8',errors='replace')
+    if re.search(r'^OK\s*$',selected,re.M):
+        selected_count=int(re.search(r'^Ran (\d+) tests?',selected,re.M)[1])
+        report['tests']['relevant_upstream_board_tests']=f'{selected_count} passed'
+report['tests']['voice_endpoints']='passed' if 'PASS: WS/WSS voice endpoints' in native_log else 'not run'
+local_smoke=ROOT/'build-local-smoke.log'
+if local_smoke.is_file() and 'PASS: local CPU server/model initialized' in local_smoke.read_text(encoding='utf-8',errors='replace'):
+    report['local_backend']={'cpu_model_and_ws_auth_hello':'passed',
+                             'real_provider_chat':'not tested; user API configuration required'}
 (ROOT/'build/validation.json').write_text(json.dumps(report,indent=2)+'\n',encoding='utf-8')
 print(f'PASS: links, assets, references, Flipper package (gap {gap} bytes); ESP32 {esp_report["target_build"]}.')

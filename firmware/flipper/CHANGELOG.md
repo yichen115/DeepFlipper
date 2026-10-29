@@ -1,0 +1,98 @@
+## Main changes
+- Current API: 88.23
+- SubGHz: **Nice O-Code remotes that send the longer 72bit frame now work** - a captured remote is saved and resent at the length it actually uses, instead of a 52bit one the gate ignores. **Nice O-Code One 433MHz** is the matching Add Manually entry
+- SubGHz: **Nice O-Code 112bit frames are decoded and sent** - the receiver certificate they carry is recovered by the Nice O-Code app and saved with the remote, and a remote that has one broadcasts it for its first 20 presses so the receiver enrols it by itself. **Nice O-Code+Crt 433MHz** is the matching Add Manually entry
+- SubGHz: Nice O-Code - the certificate is now stored and shown as the receiver's own value, the same digits for every remote of that gate, and masked with each remote's serial only on air
+- SubGHz: Nice O-Code now sends the k byte an O-Code remote really uses, instead of the Nice One one, which was wrong on 4 parcels of every 16
+- SubGHz: Nice O-Code - the certificate frame index now changes from press to press as a real remote's does, instead of repeating the same value
+- SubGHz: Nice O-Code - the end-of-press marker was set on 15 of the 16 parcels, now on the last two as a real O-Code remote does. Plain Nice One and Nice FloR-S are untouched
+- SubGHz: Nice O-Code now counts like a real remote - the field on air is a scrambled press count, so the old +1 jumped a random distance and the gate stopped opening after a few presses. `Cnt` is the plain count now wherever it is shown or typed. Plain Nice One and Nice FloR-S are untouched
+- SubGHz: Fix a received Nice O-Code frame being saved as if its installer code were FFFF - opening it from the list decoded the remote to nonsense instead of pointing at the Nice O-Code app, and offered to send it. Affected both the 72bit and the 112bit frames
+- Apps: `Nice O-Code` can decode a saved RAW `.sub` file instead of capturing over the air, and shows the certificate next to the recovered installer code
+- Apps: `Nice O-Code` - `New remote` now mints a serial the gate is certain to enrol, picking from the 1024 that keep the captured remote's certificate consistent instead of any of 2^28
+- Apps: `Seed Capturer` can decode a saved RAW `.sub` file instead of capturing over the air, and uses an external CC1101 module when one is plugged in
+- Apps: `Seed Capturer` now supports **BFT Mitto** remotes on 433.92 MHz, the same way as Erreka - capture the hops and recover the Seed in qUnleashed
+- SubGHz: **Nero Radio rolling remotes are now decoded and can be replayed** - both the normal and the long range modes. Replay only resends the captured parcel and may work just once, as the counter can't be rolled yet. Static Nero Radio remotes are read more reliably and show serial, button and hold counter
+- SubGHz Remote: **Sending button is highlighted and last pressed button details are shown** (protocol, frequency, modulation, serial, counter) instead of the D-pad
+- SubGHz Remote: Hold button for endless TX, one click sends full signal (like main SubGHz app), no more forced `Repeat` value
+- SubGHz Remote: RAW is sent in full with one click (Back to stop), repeats while button is held
+- SubGHz Remote: Fix rolling code / custom button resets after TX, custom button no longer moves counter twice per press (same as main SubGHz app)
+- Apps: `SubGHz WarDriving` - RX restarts after TX, sending a received dynamic signal no longer overwrites a saved file
+- RFID: **Better FDX-B (animal chips / implants) reading** - Read now also tries 134kHz, the frequency these chips are made for, and weak signals are decoded more reliably. Also available separately in Extra Actions -> `Read FDX-B (Animals)`
+- RFID: **New T5577 app - read a T5577, save it, write it back** - the Flipper could write a T5577 but never read one. Read Tag reads every block of both pages, and the dump is saved as `.t5577` to view, rename, delete or write to another tag. A write is read back and compared, so "Written!" means the tag confirmed it (by @mishamyte | PR #1179)
+- RFID: **New Test Tag in the T5577 app** - many chips sold as T5577 only take writes to some blocks, and from the air that looks the same as a locked one. Test Tag checks blocks 1-7 one at a time and shows a verdict for each, backing the tag up first and leaving every block as it was. A tag with a password is not tested yet (by @mishamyte | PR #1179)
+- RFID: **The firmware can read a single T5577 block** - what the app is built on. A tag's answer carries no frame marker, so the read is aligned by timing and then checked against block 0, which keeps a dump from coming back rotated by a bit (by @mishamyte | PR #1179)
+- RFID: **Wipe Tag and Clear Password now check the tag instead of assuming** - both used to claim success without looking; they write a block and read it back now, and show progress while they work. Clear Password tries no password, then your custom one, then the list, and stops at the first that works - that list moved onto the card as `/ext/lfrfid/assets/t5577_dict.lfrfid`, so a new password needs no new firmware, and a full sweep takes about a minute and a half (Back stops it). Both moved into the T5577 app (by @mishamyte | PR #1179)
+- RFID: **Fix `Write and set password` zeroing a tag's config instead of protecting it** - a password frame was sent to a tag that had no password yet, which the chip reads 32 bits early (by @mishamyte | PR #1179 | Fixes #1180)
+- RFID: **Write and set password no longer hangs with the tag left locked** - the check that protection took could wait on the LF reader for ever. Reads have a deadline now, and the screen names the stage it is on. The ordinary Write verify is fixed with it (by @mishamyte | PR #1179)
+- RFID: **T5577 dumps are saved with your keys and open from the Saved list** - a dump went into a folder of its own that the 125 kHz Saved list then showed as empty, since it lists `.rfid` files only. Dumps now save to `/ext/lfrfid` and are listed beside the keys, marked with the T5577 app's icon, and pressing one opens it in that app on the dump's own menu - Back comes straight back to the list. The archive's 125 kHz tab lists them too (by @mishamyte | PR #1188 | Closes #1187)
+- RFID: **T5577 app - leaving a dump returns to the list it was picked from** instead of the app's start menu, and deleting one lands back in the list without it (by @mishamyte | PR #1188)
+- RFID: **Fix the T5577 app moving a dump when renaming it** - a dump opened from a subfolder or from the archive was written into `/ext/lfrfid`, deleted from where it was, and reported as renamed (by @mishamyte | PR #1188)
+- RFID: T5577 app - a Test Tag backup is deleted once the tag is proven back to what it held, and kept only when a block was not restored. Starting a test while one survives warns before overwriting it (by @mishamyte | PR #1179)
+- Apps: Build tag (**25oct2026**) - **Check out more Apps updates and fixes by following** [this link](https://github.com/xMasterX/all-the-plugins/commits/dev)
+## Other changes
+- OFW: Typos fixed in on-screen text - the Infrared "can't be openned as a remote" error and the updater's "C2 Stach switch failed"
+- OFW: FatFs: apply upstream R0.12c patches, fix 0-byte files in fragmented exFAT directories
+- API: Export `faac_slh_reset_prog_mode` for apps
+- API: Export the T5577 block read/write API for apps (`t5577.h`, `t5577_file.h`) (by @mishamyte | PR #1179)
+- iButton: Fix write success text going off screen
+- RFID: Move Writing screen text up so long file names fit
+- RFID: T5577 app - `Saved` opens straight away instead of reading past every key in the folder first, and a dump that will not open says whether it is gone from the card or is not a dump this version reads (by @mishamyte | PR #1189)
+- RFID: Fix the missing-T5577-app message telling you to install it from the apps catalogue - it comes with the firmware, in its SD resources (by @mishamyte | PR #1189)
+- Archive: Fix the rename check not warning about an existing file when the extension is six characters long, such as `.t5577` - the name it looked for was cut a character short (by @mishamyte | PR #1188)
+- RFID: ~1 KB of flash freed - the near-identical write_data bodies across 20 of the LF protocols now share one implementation per chip (by @mishamyte | PR #1183)
+- Core: **~7 KB of flash freed** - number parsing no longer pulls in newlib's big-number machinery for hex floats and inf/nan, which nothing uses. Values in `.ir`/`.sub`/`.nfc` files read back exactly as before (by @mishamyte | PR #1186 | Closes #1184)
+<br><br>
+
+----
+
+[-> How to install firmware](https://github.com/DarkFlippers/unleashed-firmware/blob/dev/documentation/HowToInstall.md)
+
+[-> Unleashed FW Web Installer](https://web.unleashedflip.com)
+
+## Please support development of the project
+
+| Service                                                                                                                                                                                        | Remark                    | QR Code                                                                                                                                                                                                                             | Link/Wallet                                                                                       |
+|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------|
+| <img src="https://cdn.simpleicons.org/patreon/dark/white" alt="Patreon" width="14"/> **Patreon**                                                                                               |                           | <div align="center"><a href="https://github.com/user-attachments/assets/a88a90a5-28c3-40b4-864a-0c0b79494a42"><img src="https://github.com/user-attachments/assets/da3a864d-d1c7-42cc-8a86-6fcaf26663ec" alt="QR image"/></a></div> | [patreon.com/mmxdev](https://patreon.com/mmxdev)                                                  |
+| <img src="https://cdn.simpleicons.org/boosty" alt="Boosty" width="14"/> **Boosty**                                                                                                             | patreon alternative       | <div align="center"><a href="https://github.com/user-attachments/assets/893c0760-f738-42c1-acaa-916019a7bdf8"><img src="https://github.com/user-attachments/assets/da3a864d-d1c7-42cc-8a86-6fcaf26663ec" alt="QR image"/></a></div> | [boosty.to/mmxdev](https://boosty.to/mmxdev)                                                      |
+| <img src="https://gist.githubusercontent.com/m-xim/255a3ef36c886dec144a58864608084c/raw/71da807b4abbd1582e511c9ea30fad27f78d642a/cloudtips_icon.svg" alt="Cloudtips" width="14"/> CloudTips    | only RU payments accepted | <div align="center"><a href="https://github.com/user-attachments/assets/5de31d6a-ef24-4d30-bd8e-c06af815332a"><img src="https://github.com/user-attachments/assets/da3a864d-d1c7-42cc-8a86-6fcaf26663ec" alt="QR image"/></a></div> | [pay.cloudtips.ru/p/7b3e9d65](https://pay.cloudtips.ru/p/7b3e9d65)                                |
+| <img src="https://raw.githubusercontent.com/gist/PonomareVlad/55c8708f11702b4df629ae61129a9895/raw/1657350724dab66f2ad68ea034c480a2df2a1dfd/YooMoney.svg" alt="YooMoney" width="14"/> YooMoney | only RU payments accepted | <div align="center"><a href="https://github.com/user-attachments/assets/33454f79-074b-4349-b453-f94fdadc3c68"><img src="https://github.com/user-attachments/assets/da3a864d-d1c7-42cc-8a86-6fcaf26663ec" alt="QR image"/></a></div> | [yoomoney.ru/fundraise/XA49mgQLPA0.221209](https://yoomoney.ru/fundraise/XA49mgQLPA0.221209)      |
+| <img src="https://cdn.simpleicons.org/tether" alt="USDT" width="14"/> USDT                                                                                                                     | TRC20                     | <div align="center"><a href="https://github.com/user-attachments/assets/0500498d-18ed-412d-a1a4-8a66d0b6f057"><img src="https://github.com/user-attachments/assets/da3a864d-d1c7-42cc-8a86-6fcaf26663ec" alt="QR image"/></a></div> | `TSXcitMSnWXUFqiUfEXrTVpVewXy2cYhrs`                                                              |
+| <img src="https://cdn.simpleicons.org/ethereum" alt="ETH" width="14"/> ETH                                                                                                                     | BSC/ERC20-Tokens          | <div align="center"><a href="https://github.com/user-attachments/assets/0f323e98-c524-4f41-abb2-f4f1cec83ab6"><img src="https://github.com/user-attachments/assets/da3a864d-d1c7-42cc-8a86-6fcaf26663ec" alt="QR image"/></a></div> | `0xFebF1bBc8229418FF2408C07AF6Afa49152fEc6a`                                                      |
+| <img src="https://cdn.simpleicons.org/bitcoin" alt="BTC" width="14"/> BTC                                                                                                                      |                           | <div align="center"><a href="https://github.com/user-attachments/assets/5a904d45-947e-4b92-9f0f-7fbaaa7b37f8"><img src="https://github.com/user-attachments/assets/da3a864d-d1c7-42cc-8a86-6fcaf26663ec" alt="QR image"/></a></div> | `bc1q0np836jk9jwr4dd7p6qv66d04vamtqkxrecck9`                                                      |
+| <img src="https://cdn.simpleicons.org/solana" alt="SOL" width="13"/> SOL                                                                                                                       | Solana/Tokens             | <div align="center"><a href="https://github.com/user-attachments/assets/ab33c5e0-dd59-497b-9c91-ceb89c36b34d"><img src="https://github.com/user-attachments/assets/da3a864d-d1c7-42cc-8a86-6fcaf26663ec" alt="QR image"/></a></div> | `DSgwouAEgu8iP5yr7EHHDqMNYWZxAqXWsTEeqCAXGLj8`                                                    |
+| <img src="https://cdn.simpleicons.org/dogecoin" alt="DOGE" width="14"/> DOGE                                                                                                                   |                           | <div align="center"><a href="https://github.com/user-attachments/assets/2937edd0-5c85-4465-a444-14d4edb481c0"><img src="https://github.com/user-attachments/assets/da3a864d-d1c7-42cc-8a86-6fcaf26663ec" alt="QR image"/></a></div> | `D6R6gYgBn5LwTNmPyvAQR6bZ9EtGgFCpvv`                                                              |
+| <img src="https://cdn.simpleicons.org/litecoin" alt="LTC" width="14"/> LTC                                                                                                                     |                           | <div align="center"><a href="https://github.com/user-attachments/assets/441985fe-f028-4400-83c1-c215760c1e74"><img src="https://github.com/user-attachments/assets/da3a864d-d1c7-42cc-8a86-6fcaf26663ec" alt="QR image"/></a></div> | `ltc1q3ex4ejkl0xpx3znwrmth4lyuadr5qgv8tmq8z9`                                                     |
+| <img src="https://bitcoincash.org/img/green/bitcoin-cash-circle.svg" alt="BCH" width="14"/> BCH                                                                                                |                           | <div align="center"><a href="https://github.com/user-attachments/assets/7f365976-19a3-4777-b17e-4bfba5f69eff"><img src="https://github.com/user-attachments/assets/da3a864d-d1c7-42cc-8a86-6fcaf26663ec" alt="QR image"/></a></div> | `qquxfyzntuqufy2dx0hrfr4sndp0tucvky4sw8qyu3`                                                      |
+| <img src="https://cdn.simpleicons.org/monero" alt="XMR" width="14"/> XMR                                                                                                                       | Monero                    | <div align="center"><a href="https://github.com/user-attachments/assets/96186c06-61e7-4b4d-b716-6eaf1779bfd8"><img src="https://github.com/user-attachments/assets/da3a864d-d1c7-42cc-8a86-6fcaf26663ec" alt="QR image"/></a></div> | `41xUz92suUu1u5Mu4qkrcs52gtfpu9rnZRdBpCJ244KRHf6xXSvVFevdf2cnjS7RAeYr5hn9MsEfxKoFDRSctFjG5fv1Mhn` |
+| <img src="https://cdn.simpleicons.org/ton" alt="TON" width="14"/> TON                                                                                                                          |                           | <div align="center"><a href="https://github.com/user-attachments/assets/92a57e57-7462-42b7-a342-6f22c6e600c1"><img src="https://github.com/user-attachments/assets/da3a864d-d1c7-42cc-8a86-6fcaf26663ec" alt="QR image"/></a></div> | `UQCOqcnYkvzOZUV_9bPE_8oTbOrOF03MnF-VcJyjisTZmsxa`                                                |
+
+#### Thanks to our sponsors who supported project in the past and special thanks to sponsors who supports us on regular basis
+
+@mishamyte, ClaraCrazy, Pathfinder [Count Zero cDc], callmezimbra, Quen0n, MERRON, grvpvl (lvpvrg), art_col, ThurstonWaffles, Moneron, UterGrooll, LUCFER, Northpirate, zloepuzo, T.Rat, Alexey B., ionelife, ...
+and all other great people who supported our project and me (xMasterX), thanks to you all!
+
+## **Recommended update option - Web Updater**
+
+### What `e`, ` `, `c` means? What I need to download if I don't want to use Web updater?
+
+What build I should download and what this name means - `flipper-z-f7-update-(version)(e / c).tgz` ? <br>
+`flipper-z` = for Flipper Zero device<br>
+`f7` = Hardware version - same for all flipper zero devices<br>
+`update` = Update package, contains updater, all assets (plugins, IR libs, etc.), and firmware itself<br>
+`(version)` = Firmware version<br>
+
+| Designation | [Base Apps](https://github.com/xMasterX/all-the-plugins#default-pack) | [Extra Apps](https://github.com/xMasterX/all-the-plugins#extra-pack) |
+|-----|:---:|:---:|
+| ` ` | ✅ |  |
+| `c` |  |  |
+| `e` | ✅ | ✅ |
+
+**To enable RGB Backlight support go into LCD & Notifications settings**
+
+⚠️RGB backlight [hardware mod](https://github.com/quen0n/flipperzero-firmware-rgb#readme), works only on modded flippers! do not enable on non modded device!
+
+Firmware Self-update package (update from microSD) - `flipper-z-f7-update-(version).tgz` for mobile app / qFlipper / web<br>
+Archive of `scripts` folder (contains scripts for FW/plugins development) - `flipper-z-any-scripts-(version).tgz`<br>
+SDK files for plugins development and uFBT - `flipper-z-f7-sdk-(version).zip`
