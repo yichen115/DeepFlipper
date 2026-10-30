@@ -10,9 +10,9 @@ is the target behavior, not a claim that all milestones have shipped.
 | Flipper system | Resident DeepFlipper state and worker; does not occupy the Loader application slot |
 | Mascot | Desktop animation hook, native 64x64 character on the left, firmware fallback, fixed right column: clock/battery, bold activity plus contextual hint, aligned audio controls and lock/attention icons; cached controls hidden offline |
 | Serial | One Expansion session, 9600 discovery → 460800 preferred / 115200 latched fallback; multiplexed project/native RPC, streamed/async replies and continuous heartbeat |
-| UI/settings | English AI Assistant settings with in-place label refresh preserving selection/scroll, offline/busy feedback, phone hotspot instructions, raw ASCII/symbol page and masked secrets |
+| UI/settings | English status/IP/setup-password/help and audio shortcuts; no long-text credentials entry; live updates preserve selection and refresh the setup address |
 | Passport | Whale-girl bust portraits with collar/shoulders for happy/normal/angry moods, without a separate whale emblem; original nickname, level and XP mechanics retained |
-| Configuration | One pending module command with transaction ID, bounded deadline and final module reply |
+| Configuration | Authenticated ESP32 AP/LAN web setup, versioned NVS profile, temporary Wi-Fi trials, identity/config file exchange, periodic UART status and bounded shortcut commands |
 | Tools | 13 MCP tools: status/info, NFC protocol scan, directory/apps, app lifecycle, short keys/alert, five saved-file action kinds, query/cancel |
 | Application coexistence | Loader admission cancels assistant NFC and waits for release before normal app start |
 | ESP32 source | Dedicated S3 board, reference I2S audio, PWM RGB, local button, UART RPC/MCP bridge |
@@ -33,12 +33,13 @@ is the target behavior, not a claim that all milestones have shipped.
 - Live card-specific reads/writes, RF/IR reception/learning, generic BLE/GATT,
   GPIO/ADC/PWM tools and third-party app semantic actions remain unimplemented.
   Opening an app does not make its internal features into working AI tools.
-- Wi-Fi currently supports manual SSID/password and the inherited phone setup
-  portal. A paginated on-device scan list, explicit forget/reset flows, config
-  revision conflict UI and detailed connection diagnostics remain to implement.
-- The server-config action reapplies the transport configuration; it does not
-  certify a successful TLS/authentication/voice handshake. Authentication is
-  actually checked when the voice socket opens.
+- Wi-Fi supports ordinary 2.4 GHz personal/open networks, scan/manual SSID and
+  AP/LAN web configuration. Enterprise authentication, static IP and device OTA
+  management are not implemented. Higher-rate UART, AP/STA channel changes,
+  reconnect/power-loss persistence and actual audio still require hardware tests.
+- The server probe checks an authenticated WebSocket hello without capturing
+  audio. It does not certify provider API configuration, ASR/TTS or speaker/mic
+  operation; those have separate playback/conversation actions.
 - The physical module switch and power-off UART isolation require hardware.
   The AI-session setting stops communication; it is not a physical power switch.
 - The default RGB reference is PWM/common-cathode; the suggested GL5050 part's
@@ -48,8 +49,8 @@ is the target behavior, not a claim that all milestones have shipped.
   compatibility beyond the initial NFC path need additional implementation/tests.
 - Normal mascot animation is replaced; existing blocking warnings and special
   legacy screens are preserved. Desktop layout and actual LCD ghosting need QA.
-- Fixed English UI is implemented. Non-ASCII SSIDs and arbitrary Unicode input
-  need a defined display/input fallback; the phone portal is the current path.
+- Fixed English UI is implemented. SSID/password input uses the UTF-8 browser page;
+  Flipper shows short English network state rather than rendering dynamic SSIDs.
 
 ## Validation performed
 
@@ -57,7 +58,7 @@ is the target behavior, not a claim that all milestones have shipped.
 - The modified firmware and the full `updater_package DEBUG=0` target build.
   Packaging checks the firmware/radio memory boundary; no dangerous override is
   passed. Outputs are copied to `build/release/flipper/` by the build script.
-  The current validated firmware/radio gap is 6920 bytes; future core additions
+  The current validated firmware/radio gap is 6560 bytes; future core additions
   must continue to pass this check. Matched SD resources include the character
   frame file, not just a separately copied preview asset.
 - Initial normal size optimization exceeded the C2 boundary. Release builds now
@@ -66,7 +67,7 @@ is the target behavior, not a claim that all milestones have shipped.
   pools. External FAP compilation stays non-LTO. The whole matched resource/app
   package is rebuilt. Existing upstream startup-signature LTO warnings remain
   visible; a successful build is not a runtime certification.
-- 38 project Python tests pass on Windows and in the Linux Docker image: identity binding, allowlist behavior, expiry/
+- 40 project Python tests pass on Windows and in the Linux Docker image: identity binding, allowlist behavior, expiry/
   future credentials, revocation, final job results, timeout cancellation and
   the real configuration route refusing anonymous token issuance before reading
   an unauthenticated request body, plus stale-build-result rejection and local
@@ -229,6 +230,81 @@ Both target builds pass and paired firmware must be installed together. No
 physical hardware action has been verified. Larger future adapters should use
 existing apps or SD FAPs while preserving the remaining internal-flash/radio
 boundary. See section 6 of the final specification for full coverage targets.
+
+## ESP32 device setup page
+
+The dedicated board owns `device_setup.*`, `portal_config.h` and embedded
+`web/deepflipper_setup.*` assets. It uses the IDF Wi-Fi/HTTP server directly;
+managed upstream components are not edited. The board inherits the common Board
+interface and forwards network events to Application. Both AP and STA access use
+one authenticated HTTP service. Wi-Fi callbacks only record state; the setup task
+owns scans, retries, temporary credentials and server probes. Application/audio
+mutations are scheduled on the application task. A default no-op Board callback
+reports real voice WS phases without importing board types into the protocol.
+
+The old profile and SSID list migrate once when upgrading the app without
+wiping NVS. The full merged BIN includes padding over the NVS region and resets
+configuration/identity; existing installations with matching partitions and
+unchanged ota_0 boot selection can update only xiaozhi.bin at 0x20000. New Wi-Fi credentials remain a trial
+until matching SSID/IP confirmation; failure keeps the stored profile and recovery
+AP. Profile edits use one NVS JSON value with revision checks. The web API returns
+public fields and secret-presence flags; API responses are sent after releasing
+configuration locks so a slow browser cannot stall UART state reporting. Session
+cookies remain alive until response headers have actually been transmitted.
+Login uses a salted PSA SHA-256 digest, rate limiting, expiring HttpOnly/SameSite
+sessions and CSRF/Origin checks. The initial setup password is sent only over the
+trusted companion UART for local viewing, never through `flipper_get_status`.
+Holding the talk button 5 seconds recovers the web login/AP without clearing the
+profile or identity. Character state and LED colors use known network/authentication
+failures instead of displaying ready after a failed connection; LED pulses continue
+during long native operations, with refresh bounded to 50 Hz. AP, authentication probes and active voice keep Wi-Fi awake; the normal low-power
+request restores modem sleep after the voice connection closes and AP is off.
+Driver power changes use a separate lock so Wi-Fi event callbacks can still take
+the configuration lock. Physical current draw and analog power behavior remain
+to measure.
+
+The Python admin imports device identities and exports device-bound connection
+JSON via an authenticated endpoint. ESP32 validates format/version and both IDs
+before merging URL/token. Portable C++ tests cover identity binding, invalid
+fields, secret preservation/explicit clearing, confirmed Wi-Fi changes, bounded
+JSON parsing, session/CSRF expiry and session replacement. Python tests cover
+export auth, token binding, redaction, invalid URLs and revocation. Browser QA
+exercised login, scan selection, Wi-Fi submit/status, identity download, real
+Python config export, config import and volume save. The ESP32 HTTP/network side
+in that browser QA used a simulated device; no physical link was tested.
+
+## Full setup workflow review
+
+Wi-Fi trials now carry request IDs and explicit queued/connecting/saved/failed
+results with commit revisions. Trials only confirm a matching, timely IP after
+the old association has disconnected. Restoring the old network retains the
+failed trial result and leaves recovery AP available. Network changes allow a
+short response grace period before disconnecting, and unknown results are queried
+rather than replayed. Failed scans return empty results instead of uninitialized
+records. Web status separates current network state from requested-change results.
+
+The frontend tracks drafts and revisions per form, sends only changed settings,
+and does not clear a pasted token when volume or Wi-Fi is saved. Edits made while
+a request is in flight survive its acknowledgement. Known local commits can
+advance unrelated draft revisions; unknown external changes require explicit
+refresh, preserving the draft. The page links to the assigned LAN IP, distinguishes
+manual AP from its shutdown countdown, shows recording state and offers next-step
+instructions. Authentication tests replace their pending message with a final
+result. Server-side identity/URL edits invalidate stale downloadable profiles;
+exports include issuance/expiry metadata. App-only/full-image instructions ship
+in the ESP32 release directory.
+
+Startup/activation ownership is preserved during AI-session suspension and
+configuration reloads. A direct-voice idle device without a protocol retries
+initialization when network connects. Reloads report completion so the page cannot
+start a conversation before the new protocol is ready. Session suspension and
+reload clear queued playback, while microphone disabling ends current capture.
+WebSocket teardown joins the receive task before deleting its event group;
+reconnections clear old hello/session state and reject incomplete direct-server
+hello messages. Explicit authentication rejection no longer waits for a timeout.
+Speaker/talk prerequisites explain muted, zero-volume, disabled-microphone,
+unconfigured, disconnected and busy states. These are compiled/simulated tests;
+real audio, radio and power behavior still require the board.
 
 ## Development entry points
 

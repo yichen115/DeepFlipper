@@ -92,7 +92,7 @@ int main() {
                             "wss://voice.example.com"}) {
         assert(deepflipper::ValidVoiceEndpoint(url));
     }
-    for (const auto* url : {"https://voice.example.com/", "ws://", "wss:///xiaozhi/v1/",
+    for (const auto* url : {"ws://localhost:8000/", "ws://LOCALHOST./", "ws://127.0.0.1/", "ws://0.0.0.0/", "https://voice.example.com/", "ws://", "wss:///xiaozhi/v1/",
                             "ws://:8000/", "ws://host:0/", "ws://host:65536/",
                             "ws://host:abc/", "ws://host:/", "ws://user:pass@host/",
                             "ws://host/?token=secret", "ws://host/#fragment", "ws://host\r\nx",

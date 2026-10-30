@@ -131,18 +131,65 @@ public voice endpoint through TLS, for example the [Caddy configuration](server/
 For a trusted LAN, an explicit `ws://PC_IP:8000/xiaozhi/v1/` URL works without a
 domain or certificate. Device tokens remain mandatory; WS does not encrypt them.
 
-Read the module's Device ID and Client ID in **AI Assistant** settings, then issue
-a device credential on the trusted server/admin machine:
+## Configure the ESP32 in your browser
 
-```text
-python scripts/issue_device_token.py --device-id DEVICE_MAC --client-id CLIENT_UUID --output PRIVATE_TOKEN_FILE
-```
+Update both the ESP32 and Flipper firmware for this setup interface. On an
+existing DeepFlipper installation with the same partition table and the initial
+`ota_0` boot slot (no OTA switching), flash only `build/release/esp32/xiaozhi.bin`
+at **0x20000**, without erasing the whole chip, to preserve NVS credentials and
+identity. First installs, changed partitions or an unknown OTA boot slot use `merged-binary.bin` at **0x0**;
+the full image spans NVS and resets device configuration/identity, so configure
+again and export a new identity. Both options work with a standalone ESP32 flash
+tool and require no ESP-IDF on the user's machine.
 
-Enter the WS/WSS URL and issued device token in Flipper settings. Only the ESP32
-stores credentials; normal query responses do not disclose them. A first-time
-module can be configured over UART before Wi-Fi is connected, or via the phone
-Wi-Fi setup action. Enable the Flipper AI session and physically turn the module
-on. The AI session switch is not a substitute for the physical power switch.
+Power the
+module, enable **AI session**, then select **AI Assistant → Setup: …**.
+Flipper displays the actual setup address, hotspot name and device-specific
+**AP pass**. The initial web login password is the same AP password.
+
+1. Without a saved network, ESP32 automatically opens its protected
+   `DeepFlipper-XXXX` hotspot. Join it and browse to `http://192.168.4.1` (use the
+   actual address on Flipper if it differs). No Internet or server is required.
+2. Scan/select a **2.4 GHz** network or type a hidden SSID, enter its password,
+   then click **保存并连接**. SSID/password are submitted together. The new pair
+   is saved only after the requested network obtains an IP. On failure the old
+   profile is retained and the recovery hotspot stays available.
+3. After success, switch your phone/PC back to the home network and browse to
+   the new ESP32 IP displayed on Flipper. The hotspot closes after about 15
+   seconds. The same authenticated device page remains available on LAN.
+4. Download **设备身份** from the ESP32 page. On the Python server's admin page,
+   open **设备连接**, import that identity, confirm the ESP32-reachable WS/WSS
+   Server URL, generate and download **连接配置 JSON**. Import that file on the
+   ESP32 page; it checks Device ID and Client ID before saving. Alternatively
+   paste URL/token into the device page. Never enter the server signing secret
+   or model API Key on ESP32. Connection files contain a device credential and
+   must not be committed; `deepflipper-connection*.json` is ignored.
+5. Exit Flipper settings back to the whale desktop before asking AI to use NFC/RF/other hardware tools; settings itself occupies the foreground slot.
+   Click **测试连接与设备认证**, then separately test the speaker and a voice
+   conversation. A successful hello/auth check is not proof of ASR/TTS/audio
+   operation. Model API settings remain on the Python admin page.
+
+No SSID, password, Server URL or long token entry is needed on Flipper. It shows
+UART, Wi-Fi/IP and latest server-check state, with volume/mute/mic/LED shortcuts
+and an action to reopen the setup hotspot. A server error does not discard Wi-Fi.
+A sustained Wi-Fi failure opens recovery AP after about 60 seconds. Each requested
+network change has its own result and request ID: restoring an old live network
+does not count as saving the requested new one. Recovery AP stays open after a
+failed trial. Flipper shows the LAN address first and also lists the recovery AP.
+The web page keeps unsaved inputs across other settings saves; refresh keeps
+input, while revision conflicts require an explicit refresh before overwriting.
+Muted/zero-volume speaker tests and disabled-microphone/unconfigured conversation
+requests explain what needs changing. A startup speaker test also works offline.
+The status panel provides the next setup step and the actual recording state. Saved
+credentials migrate once from the old profile/Wi-Fi list. ESP32 NVS is the only
+active configuration source; passwords/tokens are not returned by the web API.
+
+The device web password can be changed after login. If forgotten, hold the
+ESP32 talk button for **5 seconds after normal power-on** to restore the initial
+web password and open the hotspot. Do not hold BOOT while powering on. This
+recovery keeps Wi-Fi, server credentials and the device identity. The physical
+module switch still controls power; the Flipper AI-session switch is a software
+session control.
 
 ## Local Windows backend (Docker Desktop)
 
@@ -178,10 +225,11 @@ well. `server.http_port: 0` disables the old OTA/vision HTTP service; it is sepa
 from the authenticated admin page. Unavailable vision is not advertised to MCP.
 The previous Java management configuration is rejected rather than contacted.
 
-Read Device ID / Client ID in Flipper's AI Assistant settings; select an identity
-row to see the full identity split over multiple lines. Issue a device token on
-the web page, then enter it and `ws://PC_IP:8000/xiaozhi/v1/` on Flipper. The page
-can also fill identities from connected devices. Tokens default to 30 days.
+Use the device identity/config-file flow above. The page also supports filling
+identities from currently connected devices. Device tokens default to 30 days;
+export/import a fresh connection profile when renewing them. The backend admin
+page at `127.0.0.1:8001` runs on the server computer; the ESP32 settings page is
+at the device IP shown on Flipper. They have separate credentials and purposes.
 Alternatively, the command-line issuer uses the same server signing key:
 
 ```powershell
@@ -272,10 +320,13 @@ component, which the portable native-action workflow tests also compile:
 ```text
 python -m unittest discover -s tests -v
 uv run --with ziglang python scripts/test_native.py
+node tests/setup_ui_test.cjs
 ```
+
+The JavaScript regression test uses Node without npm packages; Node is not needed to run the backend. Release ESP32 files include `FLASHING.txt` with installation/update addresses.
 
 This is not a hardware-validated product. Live card reads/writes, RF/IR receiving
 and learning, generic BLE/GATT, GPIO/ADC/PWM tools, app-specific third-party
-actions, full Wi-Fi scanning UI, secure update workflow and power/analog design
+actions, enterprise Wi-Fi/static-IP UI, secure update workflow and power/analog design
 remain incomplete. They are not advertised as working model tools. See the
 status document for limitations.

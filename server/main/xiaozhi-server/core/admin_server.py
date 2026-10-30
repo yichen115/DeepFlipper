@@ -1,11 +1,13 @@
 """Small authenticated settings page hosted by the existing Python process."""
 import asyncio
 import hmac
+import ipaddress
 import os
 from pathlib import Path
 import re
 import secrets
 import time
+from urllib.parse import urlsplit
 
 from aiohttp import web
 
@@ -118,8 +120,7 @@ class AdminServer:
     async def status(self, request):
         return web.json_response(self.runtime.status())
 
-    async def issue_token(self, request):
-        payload = await self.body(request)
+    def device_credentials(self, payload):
         device, client = payload.get('device_id', ''), payload.get('client_id', '')
         for value in (device, client):
             if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,80}', value):
@@ -132,7 +133,42 @@ class AdminServer:
             raise ValueError('设备不在允许列表内')
         manager = AuthManager(self.signing_key, auth.get('expire_seconds'))
         token = manager.generate_token(client, device)
-        return web.json_response({'token': token, 'expires_in': manager.expire_seconds})
+        return {'device_id': device, 'client_id': client, 'token': token,
+                'expires_in': manager.expire_seconds, 'issued_at': int(token.rsplit('.', 1)[1]),
+                'expires_at': int(token.rsplit('.', 1)[1]) + manager.expire_seconds}
+
+    async def issue_token(self, request):
+        result = self.device_credentials(await self.body(request))
+        return web.json_response({'token': result['token'], 'expires_in': result['expires_in']})
+
+    async def connection_profile(self, request):
+        payload = await self.body(request)
+        _, config = self.store.read()
+        url = payload.get('server_url', config.get('server', {}).get('websocket', ''))
+        if not isinstance(url, str) or not 1 <= len(url) <= 192 or any(ord(c) <= 32 or ord(c) >= 127 for c in url):
+            raise ValueError('服务器地址应为设备可访问的 WS/WSS 地址，最多 192 个 ASCII 字符')
+        try:
+            parsed = urlsplit(url)
+            port = parsed.port
+        except ValueError:
+            raise ValueError('服务器地址格式不正确') from None
+        if (parsed.scheme not in ('ws', 'wss') or not parsed.hostname or parsed.username or parsed.password
+                or parsed.query or parsed.fragment or any(c in url for c in ('@', '?', '#', '\\', '[', ']'))
+                or any(not (c.isalnum() or c in '.-') for c in parsed.hostname)
+                or parsed.netloc.endswith(':') or port == 0):
+            raise ValueError('服务器地址不支持凭据、查询参数、片段或 IPv6 字面量')
+        if parsed.hostname.lower() == 'localhost' or parsed.hostname.lower().endswith('.localhost'):
+            raise ValueError('ESP32 不能访问电脑的 localhost，请使用局域网 IP 或服务器域名')
+        try:
+            address = ipaddress.ip_address(parsed.hostname)
+        except ValueError:
+            address = None
+        if address and (address.is_loopback or address.is_unspecified or address.is_multicast):
+            raise ValueError('请使用 ESP32 可访问的局域网 IP 或服务器域名')
+        credentials = self.device_credentials(payload)
+        return web.json_response({'format': 'deepflipper.connection', 'version': 1,
+                                  'server_url': url, **credentials},
+                                 headers={'Content-Disposition': 'attachment; filename="deepflipper-connection.json"'})
 
     async def test_model(self, request):
         from openai import AsyncOpenAI, APIStatusError, APIConnectionError, APITimeoutError
@@ -168,6 +204,7 @@ class AdminServer:
             web.post('/api/logout', self.logout), web.get('/api/settings', self.settings),
             web.post('/api/settings', self.save), web.get('/api/status', self.status),
             web.post('/api/device-token', self.issue_token), web.post('/api/model-test', self.test_model),
+            web.post('/api/connection-profile', self.connection_profile),
         ])
         for route, filename in [('/', 'index.html'), ('/app.js', 'app.js'), ('/style.css', 'style.css')]:
             path = self.root / 'admin' / filename

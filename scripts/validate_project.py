@@ -67,6 +67,8 @@ assert 'PASS: C++ RPC codec' in native_log
 assert 'PASS: native RPC streaming' in native_log
 assert 'PASS: native action workflows' in native_log
 assert 'PASS: Expansion 460800 negotiation' in native_log
+assert 'PASS: device portal credentials' in native_log
+assert 'PASS: setup workflow trials' in native_log
 esp_report={'target_sdk':'release/v6.1','target_build':'not exported','hardware_validated':False}
 esp_release=ROOT/'build/release/esp32'
 esp_result=ROOT/'build/esp32-build-result.json'
@@ -95,6 +97,9 @@ if esp_result.is_file() and (esp_release/'merged-binary.bin').is_file():
         magic,kind,subtype,offset,size,label,flags=struct.unpack('<HBBII16sI',table[pos:pos+32])
         if magic==0x50AA and kind==0 and offset==app[0]:app_partition=size
     assert app_partition and app[1]<=app_partition
+    app_image=(esp_release/'xiaozhi.bin').read_bytes()
+    for asset in (ROOT/'firmware/esp32/main/boards/deepflipper-s3/web').glob('deepflipper_setup.*'):
+        assert asset.read_bytes() in app_image, ('Device web asset missing/stale in firmware',asset.name)
     esp_report.update(target_build='passed via EIM',user_sdk_path=result['idf_path'],
                       python=result['python'],app_bytes=app[1],app_partition_bytes=app_partition,
                       merged_bytes=len(merged),merged_sha256=result['merged_sha256'])
@@ -109,6 +114,7 @@ report={
     'tests':{'project_python':f'{test_count} passed','native_rpc_codec':'passed',
              'native_actions':'passed; simulated transport, not physical hardware',
              'expansion_baud_fallback':'passed; simulated peer, not electrical validation',
+             'device_setup_policy':'passed; configuration/identity/session host tests, no hardware validation',
              'relevant_upstream_board_tests':'9 passed',
              'broader_upstream_host_run':'140 run; 12 Windows environment errors; 19 skipped'},
     'esp32':esp_report,
@@ -121,6 +127,10 @@ if selected_board_log.is_file():
         selected_count=int(re.search(r'^Ran (\d+) tests?',selected,re.M)[1])
         report['tests']['relevant_upstream_board_tests']=f'{selected_count} passed'
 report['tests']['voice_endpoints']='passed' if 'PASS: WS/WSS voice endpoints' in native_log else 'not run'
+ui_log=ROOT/'build-ui-tests.log'
+if ui_log.is_file():
+    assert 'PASS: browser setup workflow' in ui_log.read_text(encoding='utf-8',errors='replace')
+    report['tests']['browser_setup_workflow']='passed; draft/outcome/audio prerequisite regression tests'
 local_smoke=ROOT/'build-local-smoke.log'
 if local_smoke.is_file() and 'PASS: local CPU server/model initialized' in local_smoke.read_text(encoding='utf-8',errors='replace'):
     report['local_backend']={'cpu_model_and_ws_auth_hello':'passed',

@@ -27,7 +27,7 @@
             <label class="check"><input id="clear-key" type="checkbox">清除已保存的 API Key</label>
             <button id="test-model" class="secondary" type="button">测试接口与工具调用</button><small class="note">测试会向模型发送一次简短请求，不执行任何硬件操作。</small>
           </article>
-          <aside class="card"><h2>语音链路</h2><dl><dt>语音识别</dt><dd id="asr-name">—</dd><dt>语音合成</dt><dd id="tts-name">—</dd></dl><label for="tts-voice">EdgeTTS 音色</label><input id="tts-voice" placeholder="zh-CN-XiaoxiaoNeural" maxlength="128"><p>默认在电脑上运行语音识别，DeepSeek 与 EdgeTTS 需要联网。设备音量和麦克风开关在 Flipper 上设置。</p><div class="callout">API Key 保存在本机配置中，页面只显示是否已配置，不会读回密钥。</div></aside>
+          <aside class="card"><h2>语音链路</h2><dl><dt>语音识别</dt><dd id="asr-name">—</dd><dt>语音合成</dt><dd id="tts-name">—</dd></dl><label for="tts-voice">EdgeTTS 音色</label><input id="tts-voice" placeholder="zh-CN-XiaoxiaoNeural" maxlength="128"><p>默认在电脑上运行语音识别，DeepSeek 与 EdgeTTS 需要联网。设备网络、音量和麦克风在 ESP32 网页设置，Flipper 保留快捷操作。</p><div class="callout">API Key 保存在本机配置中，页面只显示是否已配置，不会读回密钥。</div></aside>
         </div>
       </section>
       <section id="prompt-panel" class="panel" hidden>
@@ -35,8 +35,8 @@
         <article class="card"><h2>当前实现的 Flipper 工具</h2><p>下列能力由 ESP32 和 Flipper 代码实现。设备连接后实际通过 MCP 上报工具列表；增加提示词不会新增硬件能力。</p><label class="check"><input id="tool-calling" type="checkbox">允许模型调用设备上报的工具</label><div id="tools" class="tool-list"></div><details><summary>自动附加的工具使用规则</summary><pre id="tool-policy"></pre></details></article>
       </section>
       <section id="device-panel" class="panel" hidden>
-        <div class="grid"><article class="card"><h2>连接 ESP32</h2><label for="voice-url">填入 Flipper 的 Server URL</label><input id="voice-url" readonly><p>ESP32 接入与电脑互通的 Wi-Fi。设备 Token 绑定 Device ID 和 Client ID，可在 Flipper 的 AI Assistant 设置查看。</p><h3>已连接设备</h3><div id="devices" class="device-list">暂无连接</div></article>
-          <article class="card"><h2>签发设备 Token</h2><p>这是 ESP32 连接语音服务的凭据，不是 API Key，也不是管理口令。</p><form id="device-form"><label for="device-id">Device ID</label><input id="device-id" maxlength="80" required><label for="client-id">Client ID</label><input id="client-id" maxlength="80" required><button type="submit">签发 Token</button></form><div id="issued" hidden><label for="device-token">将此 Token 填入 Flipper</label><textarea id="device-token" rows="3" readonly></textarea><small id="expires"></small><button id="copy-token" class="secondary" type="button">复制 Token</button></div></article></div>
+        <div class="grid"><article class="card"><h2>连接 ESP32</h2><label for="voice-url">设备访问的 Server URL</label><input id="voice-url" type="url" maxlength="192" placeholder="ws://192.168.1.10:8000/xiaozhi/v1/"><p>先连接 ESP32 的设置热点，配置 2.4 GHz Wi-Fi。随后按 Flipper 显示的 IP 打开设备网页，下载设备身份文件，在这里导入。此地址应使用电脑局域网 IP 或服务器域名，不能使用 localhost。</p><h3>已连接设备</h3><div id="devices" class="device-list">暂无连接</div></article>
+          <article class="card"><h2>生成设备连接配置</h2><p>这是 ESP32 连接语音服务的凭据，不是 API Key，也不是管理口令。</p><label for="identity-file">导入 ESP32 导出的设备身份</label><input id="identity-file" type="file" accept=".json,application/json"><form id="device-form"><label for="device-id">Device ID</label><input id="device-id" maxlength="80" required><label for="client-id">Client ID</label><input id="client-id" maxlength="80" required><button type="submit">生成连接配置</button></form><div id="issued" hidden><label for="device-token">Device token（可复制到 ESP32 网页）</label><textarea id="device-token" rows="3" readonly></textarea><small id="expires"></small><button id="download-connection" class="secondary" type="button">下载连接配置 JSON</button><button id="copy-token" class="secondary" type="button">复制 Token</button></div></article></div>
       </section>
       <footer class="save-bar"><span>应用设置会重连设备，当前对话将结束。</span><button id="save" type="button">保存并应用</button></footer>
     </section>

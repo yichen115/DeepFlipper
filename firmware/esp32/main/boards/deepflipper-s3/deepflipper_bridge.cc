@@ -2,8 +2,6 @@
 #include <driver/ledc.h>
 #include <esp_log.h>
 #include <esp_timer.h>
-#include <ssid_manager.h>
-#include <wifi_manager.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -13,11 +11,11 @@
 #include "audio_codec.h"
 #include "board.h"
 #include "config.h"
+#include "device_setup.h"
 #include "native_policy.h"
 #include "settings.h"
 #include "system_info.h"
 #include "voice_endpoint.h"
-#include "wifi_board.h"
 
 namespace {
 constexpr uart_port_t kUart = UART_NUM_1;
@@ -36,15 +34,7 @@ int Integer(cJSON* object, const char* key, int fallback = 0) {
     auto item = cJSON_GetObjectItem(object, key);
     return cJSON_IsNumber(item) ? item->valueint : fallback;
 }
-cJSON* Profile() {
-    Settings settings("deepflipper");
-    auto object = cJSON_Parse(settings.GetString("profile", "{}").c_str());
-    if (!cJSON_IsObject(object)) {
-        cJSON_Delete(object);
-        object = cJSON_CreateObject();
-    }
-    return object;
-}
+cJSON* Profile() { return cJSON_Parse(DeviceSetup::Get().Profile().c_str()); }
 }  // namespace
 
 DeepFlipperBridge& DeepFlipperBridge::Get() {
@@ -61,8 +51,7 @@ void DeepFlipperBridge::RestoreSettings() {
     brightness_ = std::clamp(Integer(p, "led_brightness", 12), 0, 100);
     {
         Settings ws("websocket", true);
-        if (auto url = String(p, "url"); !url.empty())
-            ws.SetString("url", url);
+        ws.SetString("url", String(p, "url"));
         ws.SetString("token", String(p, "token"));
         ws.SetInt("version", 1);
     }
@@ -408,6 +397,7 @@ DeepFlipperBridge::NativeReply DeepFlipperBridge::Native(
                 break;
             }
             ReadFrame(10);
+            UpdateLed();
         }
         if (!native_reply_.done && native_reply_.error.empty()) {
             native_reply_.error = "timeout_unknown_result";
@@ -428,6 +418,7 @@ std::string DeepFlipperBridge::ExecuteNative(const JobEntry& job) {
 int64_t DeepFlipperBridge::NowMs() const { return esp_timer_get_time() / 1000; }
 
 void DeepFlipperBridge::Pump() {
+    UpdateLed();
     Call("{\"op\":\"ui\",\"state\":7}");
     ReadFrame(50);
 }
@@ -490,17 +481,23 @@ void DeepFlipperBridge::AudioLevel(int level) {
     audio_tick_ms_ = level < 0 ? 0 : static_cast<uint32_t>(esp_timer_get_time() / 1000);
 }
 
+void DeepFlipperBridge::RefreshSettings() {
+    RestoreSettings();
+    auto profile = Profile();
+    applying_config_ = true;
+    Board::GetInstance().GetAudioCodec()->SetOutputVolume(muted_ ? 0
+                                                                 : Integer(profile, "volume", 20));
+    applying_config_ = false;
+    cJSON_Delete(profile);
+    auto result = PublicResult(0, true);
+    std::lock_guard<std::mutex> guard(mutex_);
+    module_result_ = std::move(result);
+}
+
 void DeepFlipperBridge::VolumeChanged(int volume) {
     if (applying_config_)
         return;
-    auto p = Profile();
-    cJSON_DeleteItemFromObject(p, "volume");
-    cJSON_AddNumberToObject(p, "volume", std::clamp(volume, 0, 100));
-    {
-        Settings settings("deepflipper", true);
-        settings.SetString("profile", Serialize(p));
-    }
-    cJSON_Delete(p);
+    DeviceSetup::Get().SetVolume(std::clamp(volume, 0, 100));
     auto result = PublicResult(0, true);
     std::lock_guard<std::mutex> guard(mutex_);
     module_result_ = std::move(result);
@@ -578,65 +575,10 @@ void DeepFlipperBridge::ApplyCommand(const std::string& command) {
         return;
     command_id_ = id;
     // Main-thread application mutations are scheduled; UART keeps its heartbeats.
-    Application::GetInstance().Schedule([this, id, field, value]() {
-        auto p = Profile();
-        bool ok = true;
-        if (field == "volume") {
-            char* end = nullptr;
-            long volume = strtol(value.c_str(), &end, 10);
-            ok = end && *end == 0 && !value.empty() && volume >= 0 && volume <= 100;
-            if (ok) {
-                cJSON_DeleteItemFromObject(p, "volume");
-                cJSON_AddNumberToObject(p, "volume", volume);
-            }
-        } else if (field == "mute" || field == "microphone") {
-            bool next = field == "mute" ? !muted_ : !microphone_;
-            cJSON_DeleteItemFromObject(p, field.c_str());
-            cJSON_AddBoolToObject(p, field.c_str(), next);
-        } else if (field == "led_brightness") {
-            brightness_ = (brightness_ + 12) % 61;
-            cJSON_DeleteItemFromObject(p, "led_brightness");
-            cJSON_AddNumberToObject(p, "led_brightness", brightness_);
-        } else if (field == "url" || field == "token" || field == "ssid" ||
-                   field == "wifi_password") {
-            ok = value.size() <= (field == "ssid" ? 32U : field == "wifi_password" ? 64U : 239U);
-            if (field == "url")
-                ok = deepflipper::ValidVoiceEndpoint(value);
-            if (ok) {
-                cJSON_DeleteItemFromObject(p, field.c_str());
-                cJSON_AddStringToObject(p, field.c_str(), value.c_str());
-            }
-        } else if (field == "wifi_portal") {
-            static_cast<WifiBoard&>(Board::GetInstance()).EnterWifiConfigMode();
-        } else if (field == "test_connection") {
-            Application::GetInstance().ReloadVoiceConfig();
-        } else
-            ok = false;
-        if (ok) {
-            Settings settings("deepflipper", true);
-            settings.SetString("profile", Serialize(p));
-        }
-        cJSON_Delete(p);
-        RestoreSettings();
-        if (ok && (field == "url" || field == "token"))
-            Application::GetInstance().ReloadVoiceConfig();
-        auto profile = Profile();
-        applying_config_ = true;
-        Board::GetInstance().GetAudioCodec()->SetOutputVolume(
-            muted_ ? 0 : Integer(profile, "volume", 20));
-        applying_config_ = false;
-        if (ok && (field == "ssid" || field == "wifi_password")) {
-            auto ssid = String(profile, "ssid"), password = String(profile, "wifi_password");
-            if (!ssid.empty()) {
-                SsidManager::GetInstance().AddSsid(ssid, password);
-                WifiManager::GetInstance().StartStation();
-            }
-        }
-        cJSON_Delete(profile);
-        auto result = PublicResult(id, ok);
-        std::lock_guard<std::mutex> guard(mutex_);
-        module_result_ = std::move(result);
-    });
+    bool accepted = DeviceSetup::Get().Command(field, value);
+    auto result = PublicResult(id, accepted);
+    std::lock_guard<std::mutex> guard(mutex_);
+    module_result_ = std::move(result);
 }
 
 std::string DeepFlipperBridge::PublicResult(int id, bool success) {
@@ -646,13 +588,13 @@ std::string DeepFlipperBridge::PublicResult(int id, bool success) {
     cJSON_AddNumberToObject(result, "id", id);
     cJSON_AddBoolToObject(result, "ok", success);
     cJSON_AddNumberToObject(result, "volume", Integer(p, "volume", 20));
-    cJSON_AddStringToObject(result, "ssid", String(p, "ssid").c_str());
-    cJSON_AddStringToObject(result, "url", String(p, "url").c_str());
     cJSON_AddBoolToObject(result, "token_set", !String(p, "token").empty());
     cJSON_AddBoolToObject(result, "muted", muted_);
     cJSON_AddBoolToObject(result, "microphone", microphone_);
     cJSON_AddStringToObject(result, "device_id", SystemInfo::GetMacAddress().c_str());
     cJSON_AddStringToObject(result, "client_id", Board::GetInstance().GetUuid().c_str());
+    DeviceSetup::Get().AppendFlipper(result);
+    cJSON_AddNumberToObject(result, "uart_baud", link_rate_.Baud());
     cJSON_Delete(p);
     auto text = Serialize(result);
     cJSON_Delete(result);
@@ -660,12 +602,11 @@ std::string DeepFlipperBridge::PublicResult(int id, bool success) {
 }
 
 void DeepFlipperBridge::UpdateLed() {
-    int state = state_;
-    if (!session_)
-        state = 2;
-    if (!configured_)
-        state = 1;
     int64_t now = esp_timer_get_time();
+    if (now - last_led_refresh_us_ < 20000)
+        return;
+    last_led_refresh_us_ = now;
+    int state = DeviceSetup::Get().VisualState(configured_, state_);
     uint32_t audio_tick = audio_tick_ms_;
     bool speaking = !muted_ && audio_tick && static_cast<uint32_t>(now / 1000) - audio_tick < 150;
     if (speaking)
@@ -725,6 +666,7 @@ void DeepFlipperBridge::UpdateLed() {
 }
 
 void DeepFlipperBridge::Run() {
+    int64_t last_report = 0;
     while (true) {
         if (!session_) {
             if (linked_.exchange(false))
@@ -747,6 +689,10 @@ void DeepFlipperBridge::Run() {
             linked_ = true;
             Call(PublicResult(0, true));
         }
+        if (esp_timer_get_time() / 1000 - last_report >= 1000) {
+            last_report = esp_timer_get_time() / 1000;
+            Call(PublicResult(0, true));
+        }
         auto poll = cJSON_Parse(Call("{\"op\":\"poll\"}").c_str());
         auto command = cJSON_GetObjectItem(poll, "command");
         if (cJSON_IsObject(command))
@@ -759,7 +705,7 @@ void DeepFlipperBridge::Run() {
         }
         if (!result.empty())
             Call(result);
-        int s = state_;
+        int s = DeviceSetup::Get().VisualState(configured_, state_);
         uint32_t audio_tick = audio_tick_ms_;
         if (!muted_ && audio_tick &&
             static_cast<uint32_t>(esp_timer_get_time() / 1000) - audio_tick < 150)

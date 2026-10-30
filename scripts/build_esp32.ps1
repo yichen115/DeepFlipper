@@ -52,6 +52,26 @@ try {
         New-Item -ItemType Directory -Force (Split-Path -Parent $destination) | Out-Null
         Copy-Item -LiteralPath $source -Destination $destination
     }
+    $appAddress = [string]$flash.app.offset
+    $flashNotes = @"
+DeepFlipper ESP32-S3 N16R8 flashing
+
+Existing DeepFlipper installation (same partition layout, initial ota_0 slot):
+  File: xiaozhi.bin
+  Address: $appAddress
+  Do NOT erase the whole chip. This preserves Wi-Fi, login password and identity.
+  If OTA boot selection changed/is unknown, use the full image and reconfigure.
+
+First install / different partition layout:
+  File: merged-binary.bin
+  Address: 0x0
+  The full merged image spans NVS and resets configuration and device identity.
+  Configure Wi-Fi again and export a NEW identity for server enrollment.
+
+Update the matching Flipper TGZ too, then open AI Assistant > Setup: <IP>.
+Initial device web login = AP pass shown by Flipper. No ESP-IDF is needed to flash.
+"@
+    [System.IO.File]::WriteAllText((Join-Path $release 'FLASHING.txt'), $flashNotes, [System.Text.UTF8Encoding]::new($false))
     Write-Output "ESP32 build exported to $release; no hardware flashed."
 } finally {
     $env:PYTHONUTF8 = $previousUtf8

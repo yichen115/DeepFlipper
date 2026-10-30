@@ -44,3 +44,13 @@ if result.returncode:
     print((output/'actions-compile.log').read_text(encoding='utf-8')[-6000:])
     raise SystemExit(result.returncode)
 subprocess.run([str(actions)],check=True)
+
+portal=output/('portal_config_test.exe' if sys.platform=='win32' else 'portal_config_test')
+with (output/'portal-compile.log').open('w',encoding='utf-8') as log:
+    result=subprocess.run([str(zig),'c++','-std=c++17','-Wall','-Wextra','-Werror',
+                           '-I',str(ROOT),'-I',str(component),str(ROOT/'tests/portal_config_test.cpp'),
+                           str(cjson),'-o',str(portal)],stdout=log,stderr=subprocess.STDOUT)
+if result.returncode:
+    print((output/'portal-compile.log').read_text(encoding='utf-8')[-6000:])
+    raise SystemExit(result.returncode)
+subprocess.run([str(portal)],check=True)

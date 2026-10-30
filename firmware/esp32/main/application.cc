@@ -304,7 +304,8 @@ void Application::HandleNetworkConnectedEvent() {
     ESP_LOGI(TAG, "Network connected");
     auto state = GetDeviceState();
 
-    if (state == kDeviceStateStarting || state == kDeviceStateWifiConfiguring) {
+    if (state == kDeviceStateStarting || state == kDeviceStateWifiConfiguring ||
+        (Board::GetInstance().UseDirectVoiceServer() && state == kDeviceStateIdle && !protocol_)) {
         // Network is ready, start activation
         SetDeviceState(kDeviceStateActivating);
         if (activation_task_handle_ != nullptr) {
@@ -330,13 +331,16 @@ void Application::HandleNetworkConnectedEvent() {
 void Application::HandleNetworkDisconnectedEvent() {
     // Close current conversation when network disconnected
     auto state = GetDeviceState();
-    if (state == kDeviceStateNotifying) {
+    if (Board::GetInstance().UseDirectVoiceServer()) {
+        SuspendVoiceSession();
+    } else if (state == kDeviceStateNotifying) {
         StopNotification();
     }
     if (state == kDeviceStateConnecting || state == kDeviceStateListening ||
         state == kDeviceStateSpeaking) {
         ESP_LOGI(TAG, "Closing audio channel due to network disconnection");
-        protocol_->CloseAudioChannel();
+        if (protocol_)
+            protocol_->CloseAudioChannel();
     }
 
     // Update the status bar immediately to show the network state
@@ -737,10 +741,9 @@ void Application::InitializeProtocol() {
             if (cJSON_IsObject(payload)) {
                 CJsonStringUniquePtr payload_json(cJSON_PrintUnformatted(payload));
                 if (payload_json) {
-                    Schedule(
-                        [this, display, payload_str = std::string(payload_json.get())]() {
-                            display->SetChatMessage("system", payload_str.c_str());
-                        });
+                    Schedule([this, display, payload_str = std::string(payload_json.get())]() {
+                        display->SetChatMessage("system", payload_str.c_str());
+                    });
                 }
             } else {
                 ESP_LOGW(TAG, "Invalid custom message format: missing payload");
@@ -1470,23 +1473,47 @@ void Application::ResetProtocol() {
     });
 }
 
-void Application::ReloadVoiceConfig() {
-    if (!Board::GetInstance().UseDirectVoiceServer()) return;
-    Schedule([this]() {
-        if (protocol_) protocol_->CloseAudioChannel();
+void Application::ReloadVoiceConfig(std::function<void()> on_applied) {
+    if (!Board::GetInstance().UseDirectVoiceServer())
+        return;
+    Schedule([this, on_applied = std::move(on_applied)]() {
+        auto state = GetDeviceState();
+        // Initial protocol creation belongs to the activation task. New settings
+        // are read when opening the channel; do not race that task's ownership.
+        if (state == kDeviceStateStarting || state == kDeviceStateActivating) {
+            if (on_applied)
+                on_applied();
+            return;
+        }
+        if (state == kDeviceStateNotifying)
+            StopNotification();
         audio_service_.EnableVoiceProcessing(false);
+        audio_service_.ResetDecoder();
+        if (protocol_)
+            protocol_->CloseAudioChannel();
         protocol_.reset();
         InitializeProtocol();
         SetDeviceState(kDeviceStateIdle);
+        if (on_applied)
+            on_applied();
     });
 }
 
 void Application::SuspendVoiceSession() {
-    if (!Board::GetInstance().UseDirectVoiceServer()) return;
+    if (!Board::GetInstance().UseDirectVoiceServer())
+        return;
     Schedule([this]() {
         audio_service_.EnableVoiceProcessing(false);
         audio_service_.EnableWakeWordDetection(false);
-        if (protocol_) protocol_->CloseAudioChannel();
+        audio_service_.ResetDecoder();
+        auto state = GetDeviceState();
+        if (state == kDeviceStateStarting || state == kDeviceStateActivating ||
+            state == kDeviceStateWifiConfiguring)
+            return;
+        if (state == kDeviceStateNotifying)
+            StopNotification();
+        if (protocol_)
+            protocol_->CloseAudioChannel();
         SetDeviceState(kDeviceStateIdle);
     });
 }

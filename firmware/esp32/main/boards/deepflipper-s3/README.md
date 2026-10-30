@@ -33,3 +33,13 @@ python scripts/build.py deepflipper-s3 --name deepflipper-s3
 
 On Windows, prefer project `scripts/build_esp32.ps1`, which runs that canonical
 entry through EIM and validates the actual build result before exporting files.
+
+Device configuration runs at `http://192.168.4.1` on the protected setup AP and
+at the assigned device IP on LAN. Flipper **AI Assistant → Setup: …** shows
+the current address, AP SSID and device-specific password (also the initial web
+login password). Configure Wi-Fi in the browser, then import a connection JSON
+exported by the Python admin. No long text entry on Flipper is needed. The
+board's setup task owns AP/STA, scan/reconnect, revisioned profile persistence,
+sessions and server diagnostics; no managed component sources are modified.
+After normal boot, holding the talk button for 5 seconds restores the web login
+password and opens the AP while preserving all network/server credentials.

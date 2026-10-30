@@ -31,8 +31,15 @@ typedef struct {
     DeepFlipperState state;
     uint32_t session;
     uint32_t job;
-    char ssid[33];
-    char server[193];
+    bool ap;
+    bool web_changed;
+    uint32_t uart_baud;
+    char wifi[16];
+    char ip[16];
+    char ap_ip[16];
+    char ap_ssid[25];
+    char setup_key[13];
+    char server_state[24];
     char notice[40];
     char device_id[18];
     char client_id[37];

@@ -93,6 +93,10 @@ set(EMOTE_RESOLUTION "320_240")
 # Set default assets if the board uses partition table V2
 if(CONFIG_BOARD_TYPE_DEEPFLIPPER_S3)
     set(BOARD_DIR "deepflipper-s3")
+    set(DEEPFLIPPER_WEB_FILES
+        "boards/deepflipper-s3/web/deepflipper_setup.html"
+        "boards/deepflipper-s3/web/deepflipper_setup.js"
+        "boards/deepflipper-s3/web/deepflipper_setup.css")
 elseif(CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI)
     set(BOARD_DIR "bread-compact-wifi")
     set(BUILTIN_TEXT_FONT font_noto_sans_basic_14_1)
@@ -1136,6 +1140,9 @@ if(CONFIG_IDF_TARGET_ESP32S3)
 endif()
 
 set(MAIN_PRIV_REQUIRES_EXTRA "")
+if(CONFIG_BOARD_TYPE_DEEPFLIPPER_S3)
+    list(APPEND MAIN_PRIV_REQUIRES_EXTRA esp_http_server mbedtls)
+endif()
 if(CONFIG_XIAOZHI_NETWORK_ETHERNET AND CONFIG_XIAOZHI_ETH_PHY_IP101)
     list(APPEND MAIN_PRIV_REQUIRES_EXTRA espressif__ip101)
 endif()
@@ -1162,7 +1169,7 @@ if(CONFIG_BOARD_TYPE_ESP32_P4_FUNCTION_EV_BOARD)
     )
 endif()
 idf_component_register(SRCS ${SOURCES}
-                    EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS}
+                    EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS} ${DEEPFLIPPER_WEB_FILES}
                     INCLUDE_DIRS ${INCLUDE_DIRS}
                     WHOLE_ARCHIVE
                     PRIV_REQUIRES

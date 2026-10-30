@@ -3,6 +3,7 @@
 #include "board.h"
 #include "settings.h"
 #include "system_info.h"
+#include "voice_hello.h"
 
 #include <esp_log.h>
 #include <arpa/inet.h>
@@ -14,7 +15,11 @@
 
 WebsocketProtocol::WebsocketProtocol() { event_group_handle_ = xEventGroupCreate(); }
 
-WebsocketProtocol::~WebsocketProtocol() { vEventGroupDelete(event_group_handle_); }
+WebsocketProtocol::~WebsocketProtocol() {
+    // Keep callback state alive until the socket's receive task has stopped.
+    websocket_.reset();
+    vEventGroupDelete(event_group_handle_);
+}
 
 bool WebsocketProtocol::Start() {
     // Only connect to server when audio channel is needed
@@ -74,9 +79,15 @@ bool WebsocketProtocol::IsAudioChannelOpened() const {
 void WebsocketProtocol::CloseAudioChannel(bool send_goodbye) {
     (void)send_goodbye;  // Websocket doesn't need to send goodbye message
     websocket_.reset();
+    Board::GetInstance().OnVoiceConnectionState("closed");
 }
 
 bool WebsocketProtocol::OpenAudioChannel() {
+    websocket_.reset();
+    session_id_.clear();
+    auth_rejected_ = false;
+    xEventGroupClearBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT |
+                                                  WEBSOCKET_PROTOCOL_SERVER_REJECTED_EVENT);
     Settings settings("websocket", false);
     std::string url = settings.GetString("url");
     std::string token = settings.GetString("token");
@@ -86,6 +97,7 @@ bool WebsocketProtocol::OpenAudioChannel() {
     }
 
     error_occurred_ = false;
+    Board::GetInstance().OnVoiceConnectionState("connecting");
 
     auto network = Board::GetInstance().GetNetwork();
     websocket_ = network->CreateWebSocket(1);
@@ -140,6 +152,12 @@ bool WebsocketProtocol::OpenAudioChannel() {
             }
         } else {
             // Parse JSON data
+            if (std::string(data, len) == "认证失败") {
+                auth_rejected_ = true;
+                xEventGroupSetBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_REJECTED_EVENT);
+                Board::GetInstance().OnVoiceConnectionState("auth_failed");
+                return;
+            }
             auto root = cJSON_ParseWithLength(data, len);
             auto type = cJSON_GetObjectItem(root, "type");
             if (cJSON_IsString(type)) {
@@ -170,6 +188,7 @@ bool WebsocketProtocol::OpenAudioChannel() {
     });
 
     websocket_->OnDisconnected([this]() {
+        Board::GetInstance().OnVoiceConnectionState("closed");
         ESP_LOGI(TAG, "Websocket disconnected");
         if (on_audio_channel_closed_ != nullptr) {
             on_audio_channel_closed_();
@@ -178,6 +197,11 @@ bool WebsocketProtocol::OpenAudioChannel() {
 
     ESP_LOGI(TAG, "Connecting to websocket server: %s with version: %d", url.c_str(), version_);
     if (auto connected = websocket_->Connect(url.c_str()); !connected) {
+        Board::GetInstance().OnVoiceConnectionState(
+            connected.error().code == NetworkErrc::TlsFailed      ? "tls_failed"
+            : connected.error().code == NetworkErrc::DnsFailed    ? "dns_failed"
+            : connected.error().code == NetworkErrc::AuthRejected ? "auth_failed"
+                                                                  : "connect_failed");
         ESP_LOGE(TAG, "Failed to connect to websocket server: %s",
                  connected.error().ToString().c_str());
         SetError(Lang::Strings::SERVER_NOT_CONNECTED, url);
@@ -191,16 +215,25 @@ bool WebsocketProtocol::OpenAudioChannel() {
     }
 
     // Wait for server hello
-    EventBits_t bits =
-        xEventGroupWaitBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT, pdTRUE,
-                            pdFALSE, pdMS_TO_TICKS(10000));
-    if (!(bits & WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT)) {
-        ESP_LOGE(TAG, "Failed to receive server hello");
-        SetError(Lang::Strings::SERVER_TIMEOUT);
+    EventBits_t bits = xEventGroupWaitBits(
+        event_group_handle_,
+        WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT | WEBSOCKET_PROTOCOL_SERVER_REJECTED_EVENT, pdTRUE,
+        pdFALSE, pdMS_TO_TICKS(10000));
+    if (!(bits & WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT) ||
+        (bits & WEBSOCKET_PROTOCOL_SERVER_REJECTED_EVENT)) {
+        const bool rejected = bits & WEBSOCKET_PROTOCOL_SERVER_REJECTED_EVENT;
+        Board::GetInstance().OnVoiceConnectionState(
+            rejected ? (auth_rejected_ ? "auth_failed" : "invalid_hello") : "hello_timeout");
+        websocket_.reset();
+        ESP_LOGE(
+            TAG, "%s",
+            rejected ? "Server rejected authentication/hello" : "Failed to receive server hello");
+        SetError(rejected ? Lang::Strings::SERVER_ERROR : Lang::Strings::SERVER_TIMEOUT);
         return false;
     }
 
     if (on_audio_channel_opened_ != nullptr) {
+        Board::GetInstance().OnVoiceConnectionState("authenticated");
         on_audio_channel_opened_();
     }
 
@@ -234,6 +267,10 @@ std::string WebsocketProtocol::GetHelloMessage() {
 }
 
 void WebsocketProtocol::ParseServerHello(const cJSON* root) {
+    if (!voicehello::Valid(root, Board::GetInstance().UseDirectVoiceServer())) {
+        xEventGroupSetBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_REJECTED_EVENT);
+        return;
+    }
     auto transport = cJSON_GetObjectItem(root, "transport");
     if (!cJSON_IsString(transport)) {
         ESP_LOGE(TAG, "Missing or non-string transport in server hello");

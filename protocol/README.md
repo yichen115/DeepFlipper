@@ -31,7 +31,12 @@ Implemented operations are listed by `capabilities`, never inferred by the model
 `poll` returns at most one acknowledged mailbox command. It is held until the
 matching `module.result` arrives; a reset never replays an old session's command.
 This handles Flipper settings -> ESP32 without a second RPC client or UART.
-`module.result` reports public configuration only, never saved passwords/tokens.
+`module.result` reports Wi-Fi state, STA/AP IP, setup AP name, recent server
+check state and public settings. Saved Wi-Fi passwords and device tokens are
+never returned. The initial setup/AP password is an explicit trusted-UART-only
+field for local Flipper help; it is not included in model status/tool results.
+Reports refresh once per second, allowing the setup help page to show a new IP
+without leaving/re-entering the menu.
 Tools return a job ID, with `job.get`/`job.cancel` for completion and cancellation.
 Do not retry RF/IR output with a new request ID after an uncertain result.
 
@@ -68,3 +73,31 @@ Stop failure drops the RPC link so native apps receive session-close cleanup;
 it does not claim confirmed hardware stop. Completed records remain available
 until queried/reused or a 30-second retention expires. The model must not infer
 external target success from `target_state_verified:false`.
+
+## Browser configuration files
+
+ESP32 `/api/identity` exports JSON with `format: "deepflipper.identity"`,
+`version: 1`, `device_id` and `client_id`. The authenticated Python admin
+`POST /api/connection-profile` accepts those IDs and `server_url`, then exports
+`format: "deepflipper.connection"`, version, both IDs, URL, signed device `token`
+and `expires_in`. The ESP32 `/api/import` adds its current profile `revision`,
+checks both identities and validates every changed field before one NVS commit.
+These files do not contain model/server admin credentials; the connection file
+is still a device credential and must remain private.
+
+The embedded ESP32 API requires a device web session and CSRF for writes.
+`/api/wifi` trials SSID/password together and commits only after a matching-IP
+network event; queued acceptance is not connection success. `/api/settings`
+handles URL/token/audio/LED with revision checks. `/api/status` separates UART,
+association/DHCP, STA/AP IP and recent server hello/auth checks. `/api/test-server`
+is a bounded no-audio probe, and speaker/talk tests remain separate actions.
+
+Wi-Fi submission includes a client `request_id`; `/api/status.wifi_trial` keeps
+its ID, target SSID, final state/error and before/after commit revisions. This
+result survives restoration of an old live network. Credentials are never in the
+trial result. The browser can identify an accepted request even if its response
+was lost during network handover, and never automatically resubmits the change.
+Status also reports profile revision, apply-in-progress, actual app/recording
+state and AP close countdown. Voice actions are admitted after configuration is
+applied, with explicit prerequisite errors. Connection-profile export includes
+`issued_at` and `expires_at` in addition to `expires_in`.

@@ -134,6 +134,43 @@ class AdminTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status, 400)
         self.assertEqual((self.root / 'data/.config.yaml').read_bytes(), original)
 
+    async def test_connection_profile_is_bound_to_identity_and_excludes_provider_credentials(self):
+        self.assertEqual((await self.client.post('/api/connection-profile', json={})).status, 401)
+        headers = await self.login()
+        original = (self.root / 'data/.config.yaml').read_bytes()
+        response = await self.client.post('/api/connection-profile', json={
+            'device_id': 'device-a', 'client_id': 'client-a',
+            'server_url': 'ws://192.168.1.10:8000/xiaozhi/v1/'}, headers=headers)
+        self.assertEqual(response.status, 200)
+        data = await response.json()
+        self.assertEqual(data['format'], 'deepflipper.connection')
+        self.assertEqual(data['version'], 1)
+        self.assertEqual(data['issued_at'], int(data['token'].rsplit('.', 1)[1]))
+        self.assertEqual(data['expires_at'] - data['issued_at'], data['expires_in'])
+        self.assertEqual(data['server_url'], 'ws://192.168.1.10:8000/xiaozhi/v1/')
+        self.assertTrue(AuthManager(self.signing).verify_token(data['token'], 'client-a', 'device-a'))
+        self.assertFalse(AuthManager(self.signing).verify_token(data['token'], 'client-b', 'device-a'))
+        self.assertNotIn('secret-old', json.dumps(data))
+        self.assertNotIn(self.signing, json.dumps(data))
+        self.assertEqual(response.headers['Cache-Control'], 'no-store')
+        self.assertIn('attachment', response.headers['Content-Disposition'])
+        self.assertEqual((self.root / 'data/.config.yaml').read_bytes(), original)
+
+    async def test_connection_export_rejects_unusable_device_urls_and_revoked_devices(self):
+        headers = await self.login()
+        for url in ('http://host/', 'ws://localhost:8000/', 'ws://127.0.0.1:8000/',
+                    'ws://0.0.0.0/', 'ws://host:0/', 'ws://host:65536/',
+                    'ws://user:secret@host/', 'ws://host/?token=secret',
+                    'ws://[::1]/', 'ws://host/#x', 'ws://host:/'):
+            with self.subTest(url=url):
+                response = await self.client.post('/api/connection-profile', json={
+                    'device_id': 'device-a', 'client_id': 'client-a', 'server_url': url}, headers=headers)
+                self.assertEqual(response.status, 400)
+        (self.root / 'data/.config.yaml').write_text('server:\n  auth:\n    revoked_devices: [device-a]\n', encoding='utf-8')
+        response = await self.client.post('/api/connection-profile', json={
+            'device_id': 'device-a', 'client_id': 'client-a'}, headers=headers)
+        self.assertEqual(response.status, 400)
+
     async def test_model_connection_probe_uses_draft_key_and_only_a_harmless_tool(self):
         received = []
         async def provider(request):

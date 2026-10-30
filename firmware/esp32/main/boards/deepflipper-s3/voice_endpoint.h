@@ -20,6 +20,21 @@ inline bool ValidVoiceEndpoint(const std::string& url) {
     const auto host = authority.substr(0, separator);
     if (host.empty())
         return false;
+    auto normalized = host;
+    for (char& c : normalized)
+        if (c >= 'A' && c <= 'Z')
+            c += 'a' - 'A';
+    while (!normalized.empty() && normalized.back() == '.')
+        normalized.pop_back();
+    bool numeric = true;
+    for (char c : normalized)
+        if ((c < '0' || c > '9') && c != '.')
+            numeric = false;
+    if (normalized == "localhost" || normalized == "0.0.0.0" ||
+        (normalized.size() > 10 &&
+         normalized.compare(normalized.size() - 10, 10, ".localhost") == 0) ||
+        (numeric && normalized.rfind("127.", 0) == 0))
+        return false;
     for (char c : host) {
         if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
               c == '-' || c == '.'))

@@ -1,15 +1,18 @@
+#include <esp_network.h>
 #include <esp_sntp.h>
 #include <algorithm>
 #include <cmath>
 #include "application.h"
+#include "board.h"
 #include "button.h"
 #include "codecs/no_audio_codec.h"
 #include "config.h"
 #include "deepflipper_bridge.h"
+#include "device_setup.h"
 #include "display/display.h"
 #include "mcp_server.h"
 #include "settings.h"
-#include "wifi_board.h"
+#include "system_info.h"
 
 class FlipperDisplay : public NoDisplay {
 public:
@@ -61,9 +64,9 @@ public:
     }
 };
 
-class DeepFlipperBoard : public WifiBoard {
+class DeepFlipperBoard : public Board {
     FlipperDisplay display_;
-    Button talk_{DF_TALK_BUTTON};
+    Button talk_{DF_TALK_BUTTON, false, 5000};
     static ReturnValue Queue(const char* op, cJSON* args = nullptr, int timeout = 5000) {
         std::string params = "{}";
         if (args) {
@@ -200,23 +203,28 @@ class DeepFlipperBoard : public WifiBoard {
 
 public:
     DeepFlipperBoard() {
+        DeviceSetup::Get().Initialize(SystemInfo::GetMacAddress(), GetUuid());
         DeepFlipperBridge::Get().RestoreSettings();
         DeepFlipperBridge::Get().Start();
         talk_.OnClick([]() {
-            if (!DeepFlipperBridge::Get().MicrophoneEnabled() || !DeepFlipperBridge::Get().Linked())
+            if (!DeepFlipperBridge::Get().MicrophoneEnabled() ||
+                !DeepFlipperBridge::Get().Linked() || !DeviceSetup::Get().Connected() ||
+                DeviceSetup::Get().Probing())
                 return;
             auto& app = Application::GetInstance();
             auto state = app.GetDeviceState();
             if (state == kDeviceStateListening)
                 app.StopListening();
-            else if (state == kDeviceStateIdle || state == kDeviceStateSpeaking)
+            else if ((state == kDeviceStateIdle || state == kDeviceStateSpeaking) &&
+                     DeviceSetup::Get().ReadyToTalk())
                 app.StartListening();
         });
         RegisterTools();
+        talk_.OnLongPress([]() { DeviceSetup::Get().Recover(); });
     }
     bool UseDirectVoiceServer() const override { return true; }
     void StartNetwork() override {
-        WifiBoard::StartNetwork();
+        DeviceSetup::Get().Start();
         // TLS time is established through SNTP; certificate checking stays enabled.
         if (esp_sntp_enabled() == false) {
             esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
@@ -225,6 +233,21 @@ public:
         }
     }
     Led* GetLed() override { return &DeepFlipperBridge::Get(); }
+    void SetNetworkEventCallback(NetworkEventCallback callback) override {
+        DeviceSetup::Get().SetCallback(std::move(callback));
+    }
+    const char* GetNetworkStateIcon() override { return ""; }
+    void SetPowerSaveLevel(PowerSaveLevel level) override { DeviceSetup::Get().PowerSave(level); }
+    std::string GetDeviceStatusJson() override { return DeviceSetup::Get().Status(false); }
+    std::string GetBoardJson() override { return DeviceSetup::Get().Status(false); }
+    std::string GetBoardType() override { return "wifi"; }
+    NetworkInterface* GetNetwork() override {
+        static EspNetwork network;
+        return &network;
+    }
+    void OnVoiceConnectionState(const char* state) override {
+        DeviceSetup::Get().VoiceState(state);
+    }
     Display* GetDisplay() override { return &display_; }
     AudioCodec* GetAudioCodec() override {
         static FlipperAudio codec;

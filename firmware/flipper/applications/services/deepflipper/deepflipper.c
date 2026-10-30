@@ -305,20 +305,14 @@ void deepflipper_request(const char* json, size_t size, char* result, size_t cap
         } else if(strcmp(op, "module.result") == 0) {
             unsigned id = 0;
             int success = 0, volume = -1;
-            char *ssid = NULL, *url = NULL;
             json_scanf(
                 json,
                 size,
-                "{id:%u,ok:%B,volume:%d,ssid:%Q,url:%Q}",
+                "{id:%u,ok:%B,volume:%d}",
                 &id,
                 &success,
-                &volume,
-                &ssid,
-                &url);
+                &volume);
             if(volume >= 0 && volume <= 100) service->snapshot.volume = volume;
-            if(ssid) snprintf(service->snapshot.ssid, sizeof(service->snapshot.ssid), "%s", ssid);
-            if(url)
-                snprintf(service->snapshot.server, sizeof(service->snapshot.server), "%s", url);
             int token_set = 0, muted = 0, microphone = 1;
             json_scanf(
                 json,
@@ -340,8 +334,20 @@ void deepflipper_request(const char* json, size_t size, char* result, size_t cap
                     service->snapshot.client_id, sizeof(service->snapshot.client_id), "%s", client);
             free(device);
             free(client);
-            free(ssid);
-            free(url);
+            char *wifi = NULL, *ip = NULL, *ap_ip = NULL, *ap_ssid = NULL, *key = NULL, *server = NULL;
+            int ap = 0, changed = 0;
+            unsigned baud = 0;
+            json_scanf(json, size,
+                "{wifi:%Q,ip:%Q,ap_ip:%Q,ap_ssid:%Q,setup_key:%Q,server_state:%Q,ap:%B,web_changed:%B,uart_baud:%u}",
+                &wifi, &ip, &ap_ip, &ap_ssid, &key, &server, &ap, &changed, &baud);
+            if(wifi) snprintf(service->snapshot.wifi, sizeof(service->snapshot.wifi), "%s", wifi);
+            if(ip) snprintf(service->snapshot.ip, sizeof(service->snapshot.ip), "%s", ip);
+            if(ap_ip) snprintf(service->snapshot.ap_ip, sizeof(service->snapshot.ap_ip), "%s", ap_ip);
+            if(ap_ssid) snprintf(service->snapshot.ap_ssid, sizeof(service->snapshot.ap_ssid), "%s", ap_ssid);
+            if(key) snprintf(service->snapshot.setup_key, sizeof(service->snapshot.setup_key), "%s", key);
+            if(server) snprintf(service->snapshot.server_state, sizeof(service->snapshot.server_state), "%s", server);
+            service->snapshot.ap = ap; service->snapshot.web_changed = changed; service->snapshot.uart_baud = baud;
+            free(wifi); free(ip); free(ap_ip); free(ap_ssid); free(key); free(server);
             if(id && id == service->command_id) {
                 service->command_id = 0;
                 memset(service->command, 0, sizeof(service->command));
@@ -349,7 +355,7 @@ void deepflipper_request(const char* json, size_t size, char* result, size_t cap
                     service->snapshot.notice,
                     sizeof(service->snapshot.notice),
                     "%s",
-                    success ? "Saved by module" : "Module rejected setting");
+                    success ? "Action accepted" : "Module rejected action");
             }
             snprintf(result, capacity, "{\"ok\":true}");
         } else if(strcmp(op, "tool.nfc.scan") == 0) {

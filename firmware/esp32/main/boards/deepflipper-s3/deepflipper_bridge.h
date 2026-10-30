@@ -27,6 +27,7 @@ public:
     bool Muted() const { return muted_.load(); }
     bool Linked() const { return linked_.load(); }
     void RestoreSettings();
+    void RefreshSettings();
     void VolumeChanged(int volume);
 
 private:
@@ -73,6 +74,7 @@ private:
     bool started_ = false;
     bool rpc_transport_active_ = false;
     int64_t last_heartbeat_us_ = 0;
+    int64_t last_led_refresh_us_ = 0;
     std::atomic<int> brightness_{12};
     bool tool_active_ = false;
     bool Frame(uint8_t type, const uint8_t* data, size_t size);

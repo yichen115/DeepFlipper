@@ -40,6 +40,7 @@ Desktop.ini
 server.env
 device-token*.txt
 admin-token*.txt
+deepflipper-connection*.json
 
 # Flipper generated files (retain source assets, including whale_frames.bin)
 /firmware/flipper/toolchain/
