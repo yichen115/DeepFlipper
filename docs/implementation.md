@@ -14,7 +14,7 @@ is the target behavior, not a claim that all milestones have shipped.
 | Passport | Whale-girl bust portraits with collar/shoulders for happy/normal/angry moods, without a separate whale emblem; original nickname, level and XP mechanics retained |
 | Configuration | Authenticated ESP32 AP/LAN web setup, versioned NVS profile, temporary Wi-Fi trials, identity/config file exchange, periodic UART status and bounded shortcut commands |
 | Tools | 20 MCP tools: adds live NFC read, IR learning, OOK RAW capture, SD file read/space, clock and GPIO; app lifecycle, short/long keys, saved actions and query/cancel |
-| Application coexistence | Loader admission cancels assistant NFC and waits for release before normal app start |
+| Application coexistence | Loader admission cancels assistant NFC, frees the mascot worker stack, and yields UART RPC heap for local apps; RPC-origin app launches preserve their command transport; exit/failure restores the worker and local-app UART |
 | ESP32 source | Dedicated S3 board, reference I2S audio, GPIO48 WS2812, local button, UART RPC/MCP bridge |
 | Voice | Reuses XiaoZhi ASR/LLM/TTS transport; direct WS/WSS configuration bypasses managed OTA activation |
 | Animation linkage | State/emotion events and actual output PCM levels; no transcript/caption forwarding |
@@ -53,6 +53,14 @@ is the target behavior, not a claim that all milestones have shipped.
   Flipper shows short English network state rather than rendering dynamic SSIDs.
 
 ## Validation performed
+
+The local-app memory fix is covered by host tests of the production C functions:
+300 repeated RPC allocations/teardowns, UART versus USB/BLE/ordinary-expansion
+profiles, notification after full free, cancellation while waiting for the Loader
+barrier, and repeated local app suspend/exit/failed-launch cycles. These establish
+software lifetime/order behavior, not measured heap margins or successful physical
+NFC reads. Launch diagnostics log free heap and largest free block after yielding
+UART; actual cards and the device heap must still be checked on hardware.
 
 - The untouched Unleashed base compiled with the bundled Flipper toolchain.
 - The modified firmware and the full `updater_package DEBUG=0` target build.

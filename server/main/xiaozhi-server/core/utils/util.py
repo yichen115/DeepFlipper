@@ -389,15 +389,23 @@ def audio_bytes_to_data_stream(
     if file_type == "p3":
         # 直接用p3解码
         return p3.decode_opus_from_bytes_stream(audio_bytes, callback)
-    else:
-        # 其他格式用pydub
-        with _ffmpeg_path_override():
-            audio = AudioSegment.from_file(
-                BytesIO(audio_bytes), format=file_type, parameters=["-nostdin"]
-            )
-        audio = audio.set_channels(1).set_frame_rate(sample_rate).set_sample_width(2)
-        raw_data = audio.raw_data
-        pcm_to_data_stream(raw_data, is_opus, callback, sample_rate, opus_encoder)
+    if file_type == "wav":
+        try:
+            with wave.open(BytesIO(audio_bytes), "rb") as wf:
+                if (wf.getnchannels() == 1 and wf.getsampwidth() == 2
+                        and wf.getframerate() == sample_rate):
+                    raw_data = wf.readframes(wf.getnframes())
+                    return pcm_to_data_stream(raw_data, is_opus, callback, sample_rate, opus_encoder)
+        except wave.Error:
+            pass
+    # 其他格式或需重采样时用pydub
+    with _ffmpeg_path_override():
+        audio = AudioSegment.from_file(
+            BytesIO(audio_bytes), format=file_type, parameters=["-nostdin"]
+        )
+    audio = audio.set_channels(1).set_frame_rate(sample_rate).set_sample_width(2)
+    raw_data = audio.raw_data
+    pcm_to_data_stream(raw_data, is_opus, callback, sample_rate, opus_encoder)
 
 
 def pcm_to_data_stream(raw_data, is_opus=True, callback: Callable[[Any], Any] = None, sample_rate=16000, opus_encoder=None):

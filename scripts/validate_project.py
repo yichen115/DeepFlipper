@@ -83,6 +83,10 @@ assert 'PASS: actual tool adapter RPC detach' in native_log
 assert 'PASS: audio preview limits' in native_log
 assert 'PASS: actual PCM playback queue bounds' in native_log
 assert 'PASS: actual preview preparation completion' in native_log
+assert 'PASS: actual RPC allocation profiles' in native_log
+assert 'PASS: actual local-app UART release/resume' in native_log
+assert 'PASS: actual network playback startup ordering' in native_log
+assert 'PASS: actual speech stop waits for PCM drain' in native_log
 esp_report={'target_sdk':'release/v6.1','target_build':'not exported','hardware_validated':False}
 esp_release=ROOT/'build/release/esp32'
 esp_result=ROOT/'build/esp32-build-result.json'
@@ -137,6 +141,8 @@ report={
     'esp32':esp_report,
     'references_unchanged':True,
 }
+report['tests']['flipper_memory_coexistence']='passed; production C lifecycle tests with host Furi fixtures; physical NFC/heap unverified'
+report['tests']['network_playback']='passed; production startup/refill and per-turn counters, speech-stop PCM/DMA-tail ordering; new firmware speaker playback still requires flashing'
 selected_board_log=ROOT/'firmware/esp32/build-selected-board-tests.log'
 if selected_board_log.is_file():
     selected=selected_board_log.read_text(encoding='utf-8',errors='replace')

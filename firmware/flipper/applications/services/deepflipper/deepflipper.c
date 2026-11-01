@@ -1,4 +1,5 @@
 #include "deepflipper.h"
+#include "deepflipper_i.h"
 #include "deepflipper_sprite.h"
 
 #include <furi_hal.h>
@@ -9,19 +10,24 @@
 #include <nfc/nfc_scanner.h>
 #include <nfc/nfc_device.h>
 #include <nfc/protocols/nfc_protocol.h>
+#include <core/memmgr_heap.h>
+#include <rpc/rpc_i.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 typedef struct {
     FuriMutex* mutex;
+    FuriMutex* link_mutex;
     FuriThread* thread;
+    bool worker_stop;
     DeepFlipperSnapshot snapshot;
     uint32_t last_seen;
     uint32_t next_session;
     uint32_t next_command;
     uint32_t command_id;
     uint32_t command_deadline;
+    bool uart_suspended;
     char command[512];
     bool nfc_requested;
     bool nfc_running;
@@ -41,6 +47,14 @@ static void lock(void) {
 
 static void unlock(void) {
     furi_mutex_release(service->mutex);
+}
+
+bool deepflipper_rpc_profile_enabled(void) {
+    if(!service) return false; // Expansion can start before the assistant startup hook.
+    lock();
+    bool enabled = service->snapshot.enabled;
+    unlock();
+    return enabled;
 }
 
 static void fail(char* out, size_t capacity, const char* code) {
@@ -66,6 +80,21 @@ static void nfc_callback(NfcScannerEvent event, void* context) {
     unlock();
 }
 
+static void deepflipper_resume_uart(void) {
+    furi_mutex_acquire(service->link_mutex, FuriWaitForever);
+    lock();
+    bool resume = service->uart_suspended && service->snapshot.enabled &&
+                  !service->snapshot.foreground;
+    if(resume) service->uart_suspended = false;
+    unlock();
+    if(resume) {
+        Expansion* expansion = furi_record_open(RECORD_EXPANSION);
+        expansion_set_listen_serial(expansion, FuriHalSerialIdUsart);
+        furi_record_close(RECORD_EXPANSION);
+    }
+    furi_mutex_release(service->link_mutex);
+}
+
 static int32_t worker(void* context) {
     UNUSED(context);
     Nfc* nfc = NULL;
@@ -73,6 +102,10 @@ static int32_t worker(void* context) {
     uint32_t power_tick = 0;
     while(true) {
         lock();
+        if(service->worker_stop) {
+            unlock();
+            break;
+        }
         const uint32_t now = furi_get_tick();
         // Native RPC app/file operations can take several seconds. Physical link
         // loss still closes the Expansion RPC session and calls disconnected().
@@ -142,6 +175,9 @@ static int32_t worker(void* context) {
         DeepFlipperSnapshot snapshot;
         deepflipper_snapshot(&snapshot);
         deepflipper_sprite_update(&snapshot);
+        // Restore only after the foreground app has freed its heap. Serialize
+        // against a new launch or AI toggle; Expansion cleanup takes our state lock.
+        deepflipper_resume_uart();
         if(furi_get_tick() - power_tick > furi_ms_to_ticks(1000)) {
             Power* power = furi_record_open(RECORD_POWER);
             PowerInfo info;
@@ -158,21 +194,43 @@ static int32_t worker(void* context) {
     return 0;
 }
 
+static void deepflipper_worker_start(void) {
+    if(service->thread) return;
+    lock();
+    service->worker_stop = false;
+    unlock();
+    service->thread = furi_thread_alloc_ex("WhaleTools", 3072, worker, NULL);
+    furi_thread_start(service->thread);
+}
+
+static void deepflipper_worker_stop(void) {
+    if(!service->thread) return;
+    // Called only by Loader after NFC is confirmed released. No new NFC job
+    // can be admitted while foreground=true. Return the entire 3 KiB stack.
+    lock();
+    service->worker_stop = true;
+    unlock();
+    furi_thread_join(service->thread);
+    furi_thread_free(service->thread);
+    service->thread = NULL;
+}
+
 void deepflipper_on_system_start(void* context) {
     UNUSED(context);
     service = calloc(1, sizeof(DeepFlipper));
     service->mutex = furi_mutex_alloc(FuriMutexTypeNormal);
+    service->link_mutex = furi_mutex_alloc(FuriMutexTypeNormal);
     service->snapshot.volume = 20;
     service->snapshot.microphone = true;
     service->next_session = furi_hal_random_get();
     strcpy(service->job_state, "idle");
     deepflipper_sprite_init();
-    service->thread = furi_thread_alloc_ex("WhaleTools", 3072, worker, NULL);
     furi_record_create(RECORD_DEEPFLIPPER, service);
-    furi_thread_start(service->thread);
+    deepflipper_worker_start();
 }
 
 void deepflipper_set_enabled(bool enabled) {
+    furi_mutex_acquire(service->link_mutex, FuriWaitForever);
     lock();
     service->snapshot.enabled = enabled;
     service->snapshot.connected = false;
@@ -181,18 +239,50 @@ void deepflipper_set_enabled(bool enabled) {
     service->nfc_cancel = true;
     service->command_id = 0;
     memset(service->command, 0, sizeof(service->command));
+    service->uart_suspended = enabled && service->snapshot.foreground;
+    bool start_uart = enabled && !service->snapshot.foreground;
     unlock();
     Expansion* expansion = furi_record_open(RECORD_EXPANSION);
     if(enabled) {
         Power* power = furi_record_open(RECORD_POWER);
         power_enable_otg(power, true);
         furi_record_close(RECORD_POWER);
-        expansion_set_listen_serial(expansion, FuriHalSerialIdUsart);
+        if(start_uart) expansion_set_listen_serial(expansion, FuriHalSerialIdUsart);
     } else {
         expansion_disable(expansion);
         // Do not disable shared 5 V: the module has its own physical switch.
     }
     furi_record_close(RECORD_EXPANSION);
+    furi_mutex_release(service->link_mutex);
+}
+
+bool deepflipper_app_suspend_uart(void) {
+    furi_mutex_acquire(service->link_mutex, FuriWaitForever);
+    lock();
+    bool suspend = service->snapshot.enabled;
+    unlock();
+    if(suspend) {
+        Rpc* rpc = furi_record_open(RECORD_RPC);
+        if(!rpc_local_app_lock(rpc)) {
+            furi_record_close(RECORD_RPC);
+            furi_mutex_release(service->link_mutex);
+            return false;
+        }
+        lock();
+        service->uart_suspended = true;
+        unlock();
+        size_t before = memmgr_get_free_heap();
+        Expansion* expansion = furi_record_open(RECORD_EXPANSION);
+        expansion_disable(expansion);
+        furi_record_close(RECORD_EXPANSION);
+        rpc_local_app_unlock(rpc);
+        furi_record_close(RECORD_RPC);
+        FURI_LOG_I(
+            "DeepFlipper", "Local app: UART paused, heap %zu -> %zu, largest %zu",
+            before, memmgr_get_free_heap(), memmgr_heap_get_max_free_block());
+    }
+    furi_mutex_release(service->link_mutex);
+    return true;
 }
 
 bool deepflipper_prepare_app_start(void) {
@@ -206,7 +296,10 @@ bool deepflipper_prepare_app_start(void) {
         lock();
         bool running = service->nfc_running;
         unlock();
-        if(!running) return true;
+        if(!running) {
+            deepflipper_worker_stop();
+            return true;
+        }
         furi_delay_ms(10);
     }
     return false;
@@ -216,6 +309,7 @@ void deepflipper_app_finished(void) {
     lock();
     service->snapshot.foreground = false;
     unlock();
+    deepflipper_worker_start();
 }
 
 bool deepflipper_module_command(const char* field, const char* value) {

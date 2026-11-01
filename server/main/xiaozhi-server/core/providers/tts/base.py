@@ -111,6 +111,7 @@ class TTSProviderBase(ABC):
         self.tts_stop_request = False
         self.processed_chars = 0
         self.is_first_sentence = True
+        self.whole_utterance = bool(config.get("whole_utterance", True))
 
     def generate_filename(self, extension=".wav"):
         return os.path.join(
@@ -152,16 +153,20 @@ class TTSProviderBase(ABC):
                 try:
                     audio_bytes = asyncio.run(self._speak_once(text, None))
                     if audio_bytes:
-                        # 使用原始文本用于显示/上报
-                        self.tts_audio_queue.put((SentenceType.FIRST, None, original_text, getattr(self, 'current_sentence_id', None)))
+                        frames = []
                         audio_bytes_to_data_stream(
                             audio_bytes,
                             file_type=self.audio_file_type,
                             is_opus=True,
-                            callback=opus_handler,
+                            callback=frames.append,
                             sample_rate=self.conn.sample_rate,
                             opus_encoder=self.opus_encoder,
                         )
+                        # 使用原始文本用于显示/上报，等当前句编码完成后再一并入队，避免 sentence_start 抢跑导致句首断流
+                        self.tts_audio_queue.put((SentenceType.FIRST, None, original_text, getattr(self, 'current_sentence_id', None)))
+                        if opus_handler is not None:
+                            for frame in frames:
+                                opus_handler(frame)
                         break
                     else:
                         max_repeat_time -= 1
@@ -404,6 +409,11 @@ class TTSProviderBase(ABC):
                 if message.sentence_id == self.failed_sentence_id:
                     continue
                 if message.sentence_type == SentenceType.FIRST:
+                    # The device resets its decoder on each tts:start. Keep
+                    # the normal conversation encoder aligned with that reset,
+                    # while preserving continuity between segments in one turn.
+                    if message.sentence_id != getattr(self, 'current_sentence_id', None) and getattr(self, 'opus_encoder', None):
+                        self.opus_encoder.reset_state()
                     self.current_sentence_id = message.sentence_id
                     self.tts_stop_request = False
                     self.processed_chars = 0
@@ -412,9 +422,12 @@ class TTSProviderBase(ABC):
                     self.tts_audio_first_sentence = True
                 elif ContentType.TEXT == message.content_type:
                     self.tts_text_buff.append(message.content_detail)
-                    segment_text = self._get_segment_text()
-                    if segment_text:
-                        self.to_tts_stream(segment_text, opus_handler=self.handle_opus)
+                    if not getattr(self, 'whole_utterance', True):
+                        segment_text = self._get_segment_text()
+                        if segment_text:
+                            self.to_tts_stream(segment_text, opus_handler=self.handle_opus)
+                elif ContentType.ACTION == message.content_type and message.sentence_type == SentenceType.MIDDLE:
+                    self._process_remaining_text_stream(opus_handler=self.handle_opus)
                 elif ContentType.FILE == message.content_type:
                     self._process_remaining_text_stream(opus_handler=self.handle_opus)
                     tts_file = message.content_file
@@ -577,10 +590,10 @@ class TTSProviderBase(ABC):
         current_text = full_text[self.processed_chars :]  # 从未处理的位置开始
         last_punct_pos = -1
 
-        # 根据是否是第一句话选择不同的标点符号集合
+        # 根据是否是第一句话或超长句选择不同的标点符号集合，避免切碎短句同时防止超长句断流
         punctuations_to_use = (
             self.first_sentence_punctuations
-            if self.is_first_sentence
+            if (self.is_first_sentence or len(current_text) >= 55)
             else self.punctuations
         )
 
@@ -659,7 +672,7 @@ class TTSProviderBase(ABC):
             segment_text = textUtils.get_string_no_punctuation_or_emoji(remaining_text)
             if segment_text:
                 self.to_tts_stream(segment_text, opus_handler=opus_handler)
-                self.processed_chars += len(full_text)
+                self.processed_chars = len(full_text)
                 return True
         return False
 

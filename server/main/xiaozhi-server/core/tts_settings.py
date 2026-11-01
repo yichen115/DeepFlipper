@@ -2,7 +2,7 @@
 from pathlib import Path
 
 LOCAL_TTS = {'type': 'local_melo', 'model_dir': 'models/vits-melo-tts-zh_en',
-             'speaker_id': 0, 'speed': 1.0, 'num_threads': 2, 'output_dir': 'tmp/'}
+             'speaker_id': 0, 'speed': 1.0, 'num_threads': 4, 'output_dir': 'tmp/'}
 
 
 def local_model_files(root, config):

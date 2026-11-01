@@ -42,6 +42,7 @@ struct ExpansionWorker {
     FuriThread* thread;
     FuriStreamBuffer* rx_buf;
     FuriSemaphore* tx_semaphore;
+    FuriSemaphore* rpc_terminated;
     FuriMutex* tx_mutex;
 
     FuriHalSerialId serial_id;
@@ -201,13 +202,21 @@ static void expansion_worker_rpc_send_callback(void* context, uint8_t* data, siz
     }
 }
 
+static void expansion_worker_rpc_terminated_callback(void* context) {
+    ExpansionWorker* instance = context;
+    furi_semaphore_release(instance->rpc_terminated);
+}
+
 static bool expansion_worker_rpc_session_open(ExpansionWorker* instance) {
     Rpc* rpc = furi_record_open(RECORD_RPC);
     instance->rpc_session = rpc_session_open(rpc, RpcOwnerUart);
 
     if(instance->rpc_session) {
         instance->tx_semaphore = furi_semaphore_alloc(1, 1);
+        instance->rpc_terminated = furi_semaphore_alloc(1, 0);
         rpc_session_set_context(instance->rpc_session, instance);
+        rpc_session_set_terminated_callback(
+            instance->rpc_session, expansion_worker_rpc_terminated_callback);
         rpc_session_set_send_bytes_callback(
             instance->rpc_session, expansion_worker_rpc_send_callback);
     }
@@ -218,7 +227,12 @@ static bool expansion_worker_rpc_session_open(ExpansionWorker* instance) {
 static void expansion_worker_rpc_session_close(ExpansionWorker* instance) {
     if(instance->rpc_session) {
         rpc_session_close(instance->rpc_session);
+        furi_check(furi_semaphore_acquire(instance->rpc_terminated, FuriWaitForever) == FuriStatusOk);
+        furi_semaphore_free(instance->rpc_terminated);
         furi_semaphore_free(instance->tx_semaphore);
+        instance->rpc_session = NULL;
+        instance->rpc_terminated = NULL;
+        instance->tx_semaphore = NULL;
     }
 
     furi_record_close(RECORD_RPC);
@@ -401,7 +415,7 @@ ExpansionWorker* expansion_worker_alloc(FuriHalSerialId serial_id) {
     instance->tx_mutex = furi_mutex_alloc(FuriMutexTypeNormal);
     instance->serial_id = serial_id;
 
-    // The assistant remains connected while foreground apps and audio are busy.
+    // RPC-origin apps keep this link. Manual apps explicitly yield it to Loader.
     furi_thread_set_priority(instance->thread, FuriThreadPriorityNormal);
 
     return instance;

@@ -3,3 +3,4 @@
 .history-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.history-controls label{margin:0}.history-controls select{font:inherit;max-width:100%;padding:10px;border:1px solid var(--line);border-radius:8px}.history-controls button{margin:0}.history-event{padding:14px 16px;margin:12px 0;border-left:3px solid #dce7e8;background:#f7fafa;border-radius:8px}.history-event>div{white-space:pre-wrap;overflow-wrap:anywhere;margin-top:6px;font-size:14px;line-height:1.7}.history-event.assistant{border-color:#087d8a}.history-event.user{border-color:#77a7c4}.history-event.error{border-color:#b2644f;background:#fff4f0}.history-event.status>div{font-size:12px;color:#657f87}
 
 select{font:inherit;font-size:14px;max-width:100%;padding:12px;border:1px solid #cddcde;border-radius:9px;background:#fbfdfd;color:#193d49}#tts-preview{display:block;width:100%;margin-top:16px}
+.danger{background:#f9e8e4;color:#963f35}.danger:hover{background:#f1d4ce}

@@ -180,6 +180,7 @@ void AudioService::Stop() {
     {
         std::lock_guard<std::mutex> lock(audio_queue_mutex_);
         ++playback_generation_;
+        network_playback_.Reset();
         audio_encode_queue_.clear();
         audio_decode_queue_.clear();
         audio_playback_queue_.clear();
@@ -327,7 +328,17 @@ void AudioService::AudioOutputTask() {
     while (true) {
         std::unique_lock<std::mutex> lock(audio_queue_mutex_);
         audio_queue_cv_.wait(
-            lock, [this]() { return !audio_playback_queue_.empty() || service_stopped_.load(); });
+            lock, [this]() { return service_stopped_.load() || !audio_playback_queue_.empty(); });
+        auto ready = [this]() {
+            size_t pending = audio_playback_queue_.size() + audio_decode_queue_.size() +
+                             (decode_in_flight_ ? 1 : 0);
+            return service_stopped_.load() ||
+                   (!audio_playback_queue_.empty() &&
+                    network_playback_.Ready(audio_playback_queue_.front().network_turn, pending,
+                                            esp_timer_get_time() / 1000));
+        };
+        while (!ready())
+            audio_queue_cv_.wait_for(lock, std::chrono::milliseconds(20));
         if (service_stopped_.load()) {
             break;
         }
@@ -335,6 +346,7 @@ void AudioService::AudioOutputTask() {
         auto task = std::move(audio_playback_queue_.front());
         audio_playback_queue_.pop_front();
         output_in_flight_ = true;
+        network_playback_.OutputStart(task.network_turn, esp_timer_get_time() / 1000);
         audio_queue_cv_.notify_all();
         lock.unlock();
 
@@ -366,6 +378,10 @@ void AudioService::AudioOutputTask() {
         }
 #endif
         output_in_flight_ = false;
+        network_playback_.OutputDone(task.network_turn, esp_timer_get_time() / 1000,
+                                     task.pcm.size());
+        if (IsPlaybackDrainedLocked())
+            network_playback_.QueueEmpty(task.network_turn, esp_timer_get_time() / 1000);
         notify_drained = MarkPlaybackDrainedLocked();
         audio_queue_cv_.notify_all();
         lock.unlock();
@@ -401,13 +417,16 @@ void AudioService::OpusCodecTask() {
             lock.unlock();
 
             AudioTask task;
+            const int64_t decode_started = esp_timer_get_time();
             task.type = kAudioTaskTypeDecodeToPlaybackQueue;
             task.timestamp = packet->timestamp;
             task.playback_id = packet->playback_id;
             task.media_position_ms = packet->media_position_ms;
+            task.network_turn = packet->network_turn;
 
             SetDecodeSampleRate(packet->sample_rate, packet->frame_duration);
             bool decoded = false;
+            bool resample_error = false;
             if (opus_decoder_ != nullptr) {
                 task.pcm.resize(decoder_frame_size_);
                 esp_audio_dec_in_raw_t raw = {
@@ -428,19 +447,28 @@ void AudioService::OpusCodecTask() {
                 if (ret == ESP_AUDIO_ERR_OK) {
                     task.pcm.resize(out_frame.decoded_size / sizeof(int16_t));
                     if (decoder_sample_rate_ != codec_->output_sample_rate() &&
-                        output_resampler_ != nullptr) {
+                        output_resampler_ == nullptr) {
+                        resample_error = true;
+                    } else if (decoder_sample_rate_ != codec_->output_sample_rate()) {
                         uint32_t target_size = 0;
-                        esp_ae_rate_cvt_get_max_out_sample_num(output_resampler_, task.pcm.size(),
-                                                               &target_size);
+                        auto sized = esp_ae_rate_cvt_get_max_out_sample_num(
+                            output_resampler_, task.pcm.size(), &target_size);
                         std::vector<int16_t> resampled(target_size);
                         uint32_t actual_output = target_size;
-                        esp_ae_rate_cvt_process(output_resampler_, (esp_ae_sample_t)task.pcm.data(),
-                                                task.pcm.size(), (esp_ae_sample_t)resampled.data(),
-                                                &actual_output);
-                        resampled.resize(actual_output);
-                        task.pcm = std::move(resampled);
+                        auto converted =
+                            sized == ESP_AE_ERR_OK && target_size > 0
+                                ? esp_ae_rate_cvt_process(
+                                      output_resampler_, (esp_ae_sample_t)task.pcm.data(),
+                                      task.pcm.size(), (esp_ae_sample_t)resampled.data(),
+                                      &actual_output)
+                                : ESP_AE_ERR_FAIL;
+                        resample_error = converted != ESP_AE_ERR_OK || actual_output > target_size;
+                        if (!resample_error) {
+                            resampled.resize(actual_output);
+                            task.pcm = std::move(resampled);
+                        }
                     }
-                    decoded = true;
+                    decoded = !resample_error && !task.pcm.empty();
                 } else {
                     ESP_LOGE(TAG, "Failed to decode audio after resize, error code: %d", ret);
                 }
@@ -449,6 +477,9 @@ void AudioService::OpusCodecTask() {
             }
 
             lock.lock();
+            if (generation == playback_generation_)
+                network_playback_.Decoded(packet->network_turn, decoded, resample_error,
+                                          (esp_timer_get_time() - decode_started) / 1000);
             if (decoded && generation == playback_generation_ && !service_stopped_.load()) {
                 audio_playback_queue_.push_back(std::move(task));
             }
@@ -616,6 +647,7 @@ bool AudioService::PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> pa
                        audio_decode_queue_.size() < MAX_DECODE_PACKETS_IN_QUEUE;
             });
         } else {
+            network_playback_.QueueDrop(packet->network_turn);
             return false;
         }
     }
@@ -817,10 +849,13 @@ bool AudioService::IsPlaybackIdle() {
     return IsPlaybackDrainedLocked();
 }
 
-void AudioService::ResetDecoder() {
+void AudioService::ResetDecoder(bool preserve_network) {
     bool notify_drained = false;
     {
         std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+        if (preserve_network && network_playback_.Prepared())
+            return;
+        network_playback_.Reset();
         ++playback_generation_;
         std::unique_lock<std::mutex> decoder_lock(decoder_mutex_);
         if (opus_decoder_ != nullptr) {
@@ -837,6 +872,43 @@ void AudioService::ResetDecoder() {
     if (notify_drained && callbacks_.on_playback_drained) {
         callbacks_.on_playback_drained();
     }
+}
+
+void AudioService::BeginNetworkPlayback() {
+    ResetDecoder();
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    network_playback_.Begin();
+}
+
+void AudioService::EndNetworkPlayback() {
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    network_playback_.End();
+    audio_queue_cv_.notify_all();
+}
+
+bool AudioService::NetworkPlaybackActive() {
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    return network_playback_.Active();
+}
+
+void AudioService::RecordNetworkPacket(AudioStreamPacket& packet, bool accepted) {
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    packet.network_turn =
+        network_playback_.Packet(esp_timer_get_time() / 1000, packet.payload.size(),
+                                 packet.sample_rate, packet.frame_duration, accepted);
+}
+
+NetworkPlaybackStatistics AudioService::PlaybackStatistics() {
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    return network_playback_.Snapshot();
+}
+
+uint32_t AudioService::OutputDrainMs() const {
+    const uint32_t rate =
+        codec_ && codec_->output_sample_rate() > 0 ? codec_->output_sample_rate() : 24000;
+    // OutputData returns after copying into DMA, not after the speaker has
+    // consumed it. Reference I2S DMA holds 60 ms at 24 kHz; add a small margin.
+    return (AUDIO_CODEC_DMA_DESC_NUM * AUDIO_CODEC_DMA_FRAME_NUM * 1000 + rate - 1) / rate + 20;
 }
 
 bool AudioService::IsPlaybackDrainedLocked() const {

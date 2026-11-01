@@ -22,6 +22,7 @@
 #include "audio_debugger.h"
 #include "audio_engine.h"
 #include "fixed_queue.h"
+#include "network_playback.h"
 #include "ogg_demuxer.h"
 #include "protocol.h"
 
@@ -101,6 +102,7 @@ struct AudioTask {
     uint32_t timestamp = 0;
     uint32_t playback_id = 0;
     uint32_t media_position_ms = 0;
+    uint32_t network_turn = 0;
 };
 
 struct DebugStatistics {
@@ -141,13 +143,19 @@ public:
     void EnableDeviceAec(bool enable);
 
     void SetCallbacks(AudioServiceCallbacks& callbacks);
+    void BeginNetworkPlayback();
+    void EndNetworkPlayback();
+    bool NetworkPlaybackActive();
+    void RecordNetworkPacket(AudioStreamPacket& packet, bool accepted);
+    NetworkPlaybackStatistics PlaybackStatistics();
+    uint32_t OutputDrainMs() const;
 
     bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false);
     bool PushPcmToPlaybackQueue(std::vector<int16_t>& pcm);
     std::unique_ptr<AudioStreamPacket> PopPacketFromSendQueue();
     void PlaySound(const std::string_view& sound);
     bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples);
-    void ResetDecoder();
+    void ResetDecoder(bool preserve_network = false);
     void SetModelsList(srmodel_list_t* models_list);
 
 private:
@@ -196,6 +204,7 @@ private:
     bool output_in_flight_ = false;
     bool playback_drained_notified_ = true;
     uint32_t playback_generation_ = 0;
+    NetworkPlayback network_playback_;
     // For server AEC
     FixedQueue<uint32_t, MAX_TIMESTAMPS_IN_QUEUE> timestamp_queue_;
 

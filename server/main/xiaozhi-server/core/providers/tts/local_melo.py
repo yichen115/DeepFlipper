@@ -2,7 +2,9 @@
 import asyncio
 from functools import lru_cache
 import io
+import os
 from pathlib import Path
+import re
 import threading
 import time
 import wave
@@ -13,6 +15,81 @@ from config.config_loader import get_project_dir
 from core.providers.tts.base import TTSProviderBase
 from core.tts_settings import local_model_files
 from core.utils.speech_level import normalize_speech
+
+_SD_PATH_RE = re.compile(r'/ext/[A-Za-z0-9_./-]+')
+_ENG_WORD_RE = re.compile(r'[A-Za-z]+')
+_LETTER_DIGIT_RE = re.compile(r'([A-Za-z])(\d)|(\d)([A-Za-z])')
+_COMPOUND_TERMS = {
+    'deepflipper': 'deep flipper',
+    'mifare': 'mi fare',
+    'ibutton': 'i button',
+    'subghz': 'sub giga hertz',
+    'ghz': 'giga hertz',
+    'mhz': 'mega hertz',
+    'khz': 'kilo hertz',
+    'wifi': 'w i f i',
+}
+
+
+@lru_cache(maxsize=2)
+def _lexicon_words(model_dir: str) -> frozenset:
+    path = Path(model_dir) / 'lexicon.txt'
+    if not path.is_file():
+        return frozenset()
+    words = set()
+    with path.open(encoding='utf-8', errors='ignore') as f:
+        for line in f:
+            parts = line.split(None, 1)
+            if parts:
+                words.add(parts[0])
+    return frozenset(words)
+
+
+def _prepare_spoken_text(text: str, model_dir: str = '') -> str:
+    text = _SD_PATH_RE.sub(' S D 卡文件 ', text)
+    text = (text.replace('Wi-Fi', 'wifi').replace('wi-fi', 'wifi').replace('Sub-GHz', 'sub ghz')
+            .replace('——', '，').replace('—', '，').replace('；', '，').replace(';', '，'))
+    text = _LETTER_DIGIT_RE.sub(lambda m: f'{m.group(1) or m.group(3)} {m.group(2) or m.group(4)}', text)
+    text = _LETTER_DIGIT_RE.sub(lambda m: f'{m.group(1) or m.group(3)} {m.group(2) or m.group(4)}', text)
+    vocab = _lexicon_words(model_dir) if model_dir else frozenset()
+
+    def _norm_word(match: re.Match) -> str:
+        word = match.group(0)
+        low = word.lower()
+        if low in _COMPOUND_TERMS:
+            return _COMPOUND_TERMS[low]
+        if len(word) == 1:
+            return low
+        if word.isupper() and len(word) <= 4:
+            return ' '.join(low)
+        if vocab and low not in vocab:
+            return ' '.join(low)
+        return low
+    out = _ENG_WORD_RE.sub(_norm_word, text).strip()
+    if out and out[-1] not in '。！？!?.':
+        out += '。'
+    return out
+
+
+def _shape_and_resample(samples: np.ndarray, sample_rate: int, target_rate: int = 24000) -> tuple[np.ndarray, int]:
+    if samples.size < max(160, sample_rate // 10):
+        return samples, sample_rate
+    fade = min(int(sample_rate * 0.012), samples.size // 4)
+    if fade > 1:
+        ramp = np.linspace(0.0, 1.0, fade, dtype=np.float32)
+        samples = samples.copy()
+        samples[:fade] *= ramp
+        samples[-fade:] *= ramp[::-1]
+    lead = np.zeros(int(sample_rate * 0.12), dtype=np.float32)
+    tail = np.zeros(int(sample_rate * 0.12), dtype=np.float32)
+    padded = np.concatenate((lead, samples, tail))
+    if sample_rate != target_rate and target_rate > 0:
+        target_len = max(1, int(round(padded.size * target_rate / sample_rate)))
+        x_old = np.linspace(0.0, 1.0, num=padded.size, endpoint=False)
+        x_new = np.linspace(0.0, 1.0, num=target_len, endpoint=False)
+        padded = np.interp(x_new, x_old, padded).astype(np.float32)
+        return padded, target_rate
+    return padded, sample_rate
 
 
 @lru_cache(maxsize=2)
@@ -26,7 +103,7 @@ def engine(model_dir, threads):
                 lexicon=str(directory / 'lexicon.txt'), dict_dir=str(directory / 'dict')),
             num_threads=threads, provider='cpu', debug=False),
         rule_fsts=','.join(str(directory / name) for name in ('date.fst', 'number.fst', 'phone.fst')
-                          if (directory / name).is_file()), max_num_sentences=1)
+                          if (directory / name).is_file()), max_num_sentences=20)
     if not config.validate():
         raise ValueError('Invalid local TTS model configuration')
     return sherpa_onnx.OfflineTts(config), threading.Lock()
@@ -36,7 +113,10 @@ class TTSProvider(TTSProviderBase):
     def __init__(self, config, delete_audio_file=True):
         super().__init__(config, delete_audio_file)
         directory = local_model_files(get_project_dir(), config)
-        self.engine, self.engine_lock = engine(str(directory), max(1, min(4, int(config.get('num_threads', 2)))))
+        self.model_dir = str(directory)
+        default_threads = min(6, max(2, (os.cpu_count() or 4) // 2))
+        threads = max(1, min(8, int(config.get('num_threads', default_threads))))
+        self.engine, self.engine_lock = engine(self.model_dir, threads)
         self.audio_file_type = 'wav'
         self.speaker = int(config.get('speaker_id', 0))
         self.speed = float(config.get('speed', 1.0))
@@ -46,6 +126,7 @@ class TTSProvider(TTSProviderBase):
     def _wav(self, text):
         if not isinstance(text, str) or not text.strip() or len(text) > 2000:
             raise ValueError('TTS text must contain 1..2000 characters')
+        spoken = _prepare_spoken_text(text, self.model_dir)
         deadline = time.monotonic() + self.tts_timeout
         if not self.engine_lock.acquire(timeout=self.tts_timeout):
             raise TimeoutError('Local TTS is busy')
@@ -54,7 +135,7 @@ class TTSProvider(TTSProviderBase):
                 return int(time.monotonic() >= deadline or
                            bool(self.conn and (self.conn.stop_event.is_set() or self.conn.client_abort)))
             # sherpa's native callback returns 1 to continue and 0 to stop.
-            audio = self.engine.generate(text, sid=self.speaker, speed=self.speed,
+            audio = self.engine.generate(spoken, sid=self.speaker, speed=self.speed,
                                          callback=lambda samples, progress: int(not cancelled(samples, progress)))
             if cancelled(None, None):
                 raise TimeoutError('Local TTS cancelled or timed out')
@@ -62,11 +143,12 @@ class TTSProvider(TTSProviderBase):
             if not samples.size or not np.isfinite(samples).all():
                 raise ValueError('Local TTS generated no valid audio')
             samples = normalize_speech(samples)
+            samples, out_rate = _shape_and_resample(samples, int(audio.sample_rate), 24000)
             buffer = io.BytesIO()
             with wave.open(buffer, 'wb') as output:
                 output.setnchannels(1)
                 output.setsampwidth(2)
-                output.setframerate(audio.sample_rate)
+                output.setframerate(out_rate)
                 output.writeframes((np.clip(samples, -1, 1) * 32767).astype('<i2').tobytes())
             return buffer.getvalue()
         finally:

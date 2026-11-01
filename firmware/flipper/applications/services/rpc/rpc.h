@@ -10,6 +10,7 @@ extern "C" {
 #endif
 
 #define RPC_BUFFER_SIZE (1024)
+#define RPC_SESSION_THREAD_NAME "RpcSessionWorker"
 
 #define RECORD_RPC "rpc"
 

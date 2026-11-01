@@ -66,6 +66,16 @@ Expansion heartbeats continue during long native app/file operations; companion
 status/UI messages are refreshed between commands. The companion watchdog is
 10 seconds; physical link loss still closes the Expansion RPC session promptly.
 
+Local/manual Loader launches yield the assistant's background worker stack and
+UART RPC session before loading the application. Exit or failed admission restarts
+the background worker; UART discovery resumes after the foreground releases its
+heap. RPC-origin launches (including app.open without RPC arguments) retain their
+command session. The close notification is delivered after session resources and
+the RPC stack are freed; a bounded admission barrier avoids closing an RPC command
+that is itself waiting for Loader. Only AI-enabled UART sessions omit the unused
+upstream GPS/network bridge contexts; USB/BLE and ordinary expansion sessions keep
+their native bridge support. The wire protocol and native action tags are unchanged.
+
 The ESP32 native action engine implements info, paginated directory/apps,
 app open/state/RPC exit, short input, audiovisual alert, and bounded saved-file
 actions. Saved card/key loads start emulation; they are not general read/write

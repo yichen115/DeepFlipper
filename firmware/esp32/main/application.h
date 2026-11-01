@@ -37,6 +37,7 @@
 #define MAIN_EVENT_STATE_CHANGED (1 << 12)
 #define MAIN_EVENT_PLAYBACK_DRAINED (1 << 13)
 #define MAIN_EVENT_STARTUP_HINT_TIMEOUT (1 << 14)
+#define MAIN_EVENT_SPEECH_STOP_READY (1 << 15)
 
 enum AecMode {
     kAecOff,
@@ -127,7 +128,8 @@ public:
      */
     void ResetProtocol();
     void ReloadVoiceConfig(std::function<void()> on_applied = {});
-    void SuspendVoiceSession(std::function<void()> on_suspended = {}, std::function<bool()> should_suspend = {});
+    void SuspendVoiceSession(std::function<void()> on_suspended = {},
+                             std::function<bool()> should_suspend = {});
 
 private:
     Application();
@@ -139,6 +141,10 @@ private:
     EventGroupHandle_t event_group_ = nullptr;
     esp_timer_handle_t clock_timer_handle_ = nullptr;
     esp_timer_handle_t startup_wake_word_hint_timer_ = nullptr;
+    esp_timer_handle_t speech_stop_timer_ = nullptr;
+    bool pending_speech_stop_ = false;
+    bool speech_stop_timer_armed_ = false;
+    int64_t speech_stop_deadline_us_ = 0;
     DeviceStateMachine state_machine_;
     ListeningMode listening_mode_ = kListeningModeAutoStop;
     AecMode aec_mode_ = kAecOff;
@@ -164,6 +170,9 @@ private:
     TaskHandle_t activation_task_handle_ = nullptr;
 
     // Event handlers
+    void CancelSpeechStop();
+    void RequestSpeechStop();
+    void CompleteSpeechStop();
     void HandleStateChangedEvent();
     void HandleToggleChatEvent();
     void HandleStartListeningEvent();

@@ -83,6 +83,127 @@ class AdminTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.client.get('/api/history?before=-1')).status,400)
         history.close()
 
+    async def test_history_clear_requires_auth_csrf_and_explicit_scope(self):
+        payload = {'scope': 'device', 'device': 'device-a'}
+        self.assertEqual((await self.client.post('/api/history/clear', json=payload)).status, 401)
+        headers = await self.login()
+        history = history_for(str(self.root))
+        try:
+            for device in ('device-a', 'device-b'):
+                history.append(device, 'c', 's', 'user', 'private question')
+                history.append(device, 'c', 's', 'assistant', 'private answer')
+            history.pending.join()
+            config = (self.root / 'data/.config.yaml').read_bytes()
+            self.assertEqual((await self.client.post('/api/history/clear', json=payload)).status, 403)
+            denied = await self.client.post('/api/history/clear', json=payload,
+                headers={**headers, 'Origin': 'https://other.invalid'})
+            self.assertEqual(denied.status, 403)
+            for invalid in ({}, {'scope': 'device', 'device': ''}, {'scope': 'all', 'device': 'device-a'},
+                            {'scope': 'device', 'device': []}, {'scope': 'device', 'device': 'x'*81}):
+                self.assertEqual((await self.client.post('/api/history/clear', json=invalid, headers=headers)).status, 400)
+            self.assertEqual(len(history.read()['events']), 4)
+            response = await self.client.post('/api/history/clear', json=payload, headers=headers)
+            self.assertEqual(response.status, 200)
+            self.assertEqual((await response.json())['deleted'], 2)
+            self.assertEqual(history.context('device-a', 'c'), [])
+            self.assertEqual(len(history.context('device-b', 'c')), 2)
+            response = await self.client.post('/api/history/clear', json={'scope': 'all'}, headers=headers)
+            self.assertEqual((await response.json())['deleted'], 2)
+            self.assertEqual(history.read()['events'], [])
+            self.assertEqual((self.root / 'data/.config.yaml').read_bytes(), config)
+        finally:
+            history.close()
+
+    async def test_tts_preview_opus_mode_is_validated_and_preserves_configuration(self):
+        headers = await self.login()
+        original = (self.root / 'data/.config.yaml').read_bytes()
+        response = await self.client.post('/api/tts-test', json={'preview_mode':'unknown'}, headers=headers)
+        self.assertEqual(response.status,400)
+        fake = types.SimpleNamespace(audio_file_type='wav',text_to_speak=None)
+        async def speak(*args):return b'source-wav'
+        fake.text_to_speak = speak
+        modules = types.ModuleType('core.utils.modules_initialize')
+        modules.initialize_tts = lambda config: fake
+        from unittest.mock import Mock, patch
+        diagnostics = types.ModuleType('core.audio_diagnostics')
+        convert = diagnostics.opus_preview = Mock(return_value=b'roundtrip-wav')
+        with patch.dict(sys.modules,{'core.utils.modules_initialize':modules,'core.audio_diagnostics':diagnostics}):
+            response = await self.client.post('/api/tts-test',json={'preview_mode':'opus'},headers=headers)
+            self.assertEqual(response.status,200)
+            self.assertEqual(response.content_type,'audio/wav')
+            self.assertEqual(await response.read(),b'roundtrip-wav')
+            convert.assert_called_once_with(b'source-wav','wav',24000)
+        self.assertEqual((self.root / 'data/.config.yaml').read_bytes(),original)
+
+    async def test_stream_test_requires_connected_idle_device_and_never_calls_llm(self):
+        import threading
+        from unittest.mock import AsyncMock, Mock, patch
+        self.assertEqual((await self.client.post('/api/tts-stream-test',json={})).status,401)
+        headers=await self.login()
+        self.assertEqual((await self.client.post('/api/tts-stream-test',json={},headers=headers)).status,400)
+        payload={'device_id':'device-a','text':'这是一段测试语音。'}
+        self.assertEqual((await self.client.post('/api/tts-stream-test',json=payload,headers=headers)).status,409)
+        conn=types.SimpleNamespace(device_id='device-a',stop_event=threading.Event(),
+            tts=types.SimpleNamespace(text_to_speak=AsyncMock(return_value=b'generated'),audio_file_type='wav'),
+            asr_audio=[b'discard'],client_audio_buffer=bytearray(b'discard'),client_is_speaking=False,
+            sample_rate=24000,clear_queues=lambda:None)
+        self.runtime.server=types.SimpleNamespace(connections=[conn])
+        sends=types.ModuleType('core.handle.sendAudioHandle')
+        sends.send_tts_message=AsyncMock();sends.sendAudio=AsyncMock()
+        diagnostics = types.ModuleType('core.audio_diagnostics')
+        diagnostics.prepare_opus_audio = Mock(return_value=(b'test-wav',[b'1',b'2']))
+        with patch.dict(sys.modules,{'core.handle.sendAudioHandle':sends,'core.audio_diagnostics':diagnostics}):
+            response=await self.client.post('/api/tts-stream-test',json=payload,headers=headers)
+            self.assertEqual(response.status,200)
+            self.assertEqual((await response.json())['duration_ms'],120)
+            self.assertEqual(conn.asr_audio,[])
+            self.assertEqual(conn.client_audio_buffer,bytearray())
+            self.assertFalse(conn.diagnostic_playback)
+            self.assertEqual([call.args[1] for call in sends.send_tts_message.await_args_list],['start','sentence_start','stop'])
+            self.assertEqual(sends.sendAudio.await_args.args[1],[b'1',b'2'])
+        sample=await self.client.get('/api/tts-stream-test/audio')
+        self.assertEqual(await sample.read(),b'test-wav')
+        self.assertEqual(sample.content_type,'audio/wav')
+        # A live LLM response is not interrupted by a diagnostic request.
+        conn.client_is_speaking=True
+        self.assertEqual((await self.client.post('/api/tts-stream-test',json=payload,headers=headers)).status,409)
+
+    async def test_segmented_stream_test_uses_real_text_queue_and_captures_a_reference(self):
+        import threading
+        from unittest.mock import AsyncMock, Mock, patch
+        headers=await self.login()
+        conn=types.SimpleNamespace(device_id='device-a',stop_event=threading.Event(),
+            tts=types.SimpleNamespace(text_to_speak=AsyncMock(),audio_file_type='wav'),
+            asr_audio=[],client_audio_buffer=bytearray(),client_is_speaking=False,
+            sample_rate=24000,clear_queues=lambda:None)
+        messages=[]
+        class TextQueue:
+            def put(self,message):
+                messages.append(message)
+                if message.sentence_type.value=='LAST':
+                    conn.audio_test_packets.extend([b'frame1',b'frame2'])
+                    conn.client_is_speaking=False
+        conn.tts.tts_text_queue=TextQueue()
+        self.runtime.server=types.SimpleNamespace(connections=[conn])
+        sends=types.ModuleType('core.handle.sendAudioHandle')
+        sends.send_tts_message=AsyncMock();sends.sendAudio=AsyncMock()
+        diagnostics=types.ModuleType('core.audio_diagnostics')
+        diagnostics.prepare_opus_audio=Mock()
+        diagnostics.decode_opus_packets=Mock(return_value=b'decoded-reference')
+        with patch.dict(sys.modules,{'core.handle.sendAudioHandle':sends,'core.audio_diagnostics':diagnostics}):
+            response=await self.client.post('/api/tts-stream-test',json={
+                'device_id':'device-a','text':'测试分句。','segmented':True},headers=headers)
+            self.assertEqual(response.status,200)
+            self.assertEqual((await response.json())['sample_kind'],'opus_decoded')
+            self.assertEqual([message.sentence_type.value for message in messages],['FIRST','MIDDLE','LAST'])
+            self.assertEqual(messages[1].content_detail,'测试分句。')
+            diagnostics.decode_opus_packets.assert_called_once_with([b'frame1',b'frame2'],24000)
+            conn.tts.text_to_speak.assert_not_awaited()
+            sends.sendAudio.assert_not_awaited()
+        self.assertFalse(conn.diagnostic_playback)
+        self.assertIsNone(conn.audio_test_packets)
+        self.assertEqual(await (await self.client.get('/api/tts-stream-test/audio')).read(),b'decoded-reference')
+
     async def test_settings_do_not_return_saved_provider_or_server_keys(self):
         await self.login()
         response = await self.client.get('/api/settings')

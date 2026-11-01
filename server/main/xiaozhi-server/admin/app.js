@@ -2,7 +2,10 @@
 const $ = id => document.getElementById(id);
 let csrf = '', revision = '', pollTimer = null, connectionProfile = null;
 let historyCursor = 0, historyNext = 0, historyLoading = false, historyGeneration = 0;
+let historyClearRequest = null;
 let previewUrl = null;
+let previewGeneration = 0;
+let streamTesting = false;
 function refreshTts() {
   const local=$('tts-provider').value==='LocalTTS';
   $('tts-voice').disabled=local;
@@ -28,9 +31,12 @@ async function api(path, options = {}) {
   return data;
 }
 function showLogin() {
+  previewGeneration++;
   if(previewUrl) URL.revokeObjectURL(previewUrl);previewUrl=null;
   $('tts-preview').pause();$('tts-preview').removeAttribute('src');$('tts-preview').hidden=true;
+  $('download-tts').hidden=true;$('download-tts').removeAttribute('href');
   historyGeneration++;historyCursor=historyNext=0;
+  historyLoading=false;historyClearRequest=null;historyControls(false);
   $('history-events').replaceChildren();
   connectionProfile = null;
   $('console').hidden = true; $('login-card').hidden = false; $('runtime').textContent = '未登录';
@@ -82,19 +88,32 @@ async function status() {
     const id = document.createElement('div'); id.textContent = `Device ID: ${item.device_id}`; row.append(id);
     const client = document.createElement('div'); client.textContent = `Client ID: ${item.client_id}`; row.append(client);
     const tools = document.createElement('div'); tools.textContent = `设备上报工具：${item.tools.join(', ') || '等待 MCP 协商'}`; row.append(tools);
+    if(item.audio_tx){const a=document.createElement('div');a.textContent=`本轮语音发送：${item.audio_tx.sample_rate} Hz，已发 ${item.audio_tx.packets} 包，队列 ${item.audio_tx.queued} 包，最大发送间隔 ${item.audio_tx.max_send_gap_ms} ms，长停顿后重新预填充 ${item.audio_tx.refill_bursts??0} 次。`;row.append(a);}
     const use = document.createElement('button'); use.className = 'secondary'; use.type = 'button'; use.textContent = '使用这组身份';
     use.addEventListener('click', () => { $('device-id').value = item.device_id; $('client-id').value = item.client_id; invalidateConnection(); }); row.append(use);
+    for(const segmented of [false,true]) {
+    const test=document.createElement('button');test.className='secondary';test.type='button';test.textContent=segmented?'按真实对话分句测试':'播放长语音测试';test.disabled=streamTesting;
+    test.addEventListener('click',()=>busy(test,async()=>{
+      streamTesting=true;
+      try {
+        message(segmented?'正在使用真实 TTS 分句队列测试，不调用大模型和工具…':'正在向设备发送固定长语音，不调用大模型和工具…');
+        const result=await api('/api/tts-stream-test',{method:'POST',body:{device_id:item.device_id,segmented}});
+        message(`测试语音已发送，约 ${(result.duration_ms/1000).toFixed(1)} 秒；可下载同一段样本到 ESP32 网页做缓冲播放对照。`);
+      } finally {streamTesting=false;}
+    }));row.append(test);
+    }
+    const sample=document.createElement('a');sample.href='/api/tts-stream-test/audio';sample.textContent='下载最近一次测试的音频样本';row.append(sample);
     $('devices').append(row);
   }
   if(!$('history-panel').hidden && !historyCursor) await loadHistory();
 }
 async function loadHistory(before=0) {
-  if(historyLoading) return;
-  historyLoading=true;
+  if(historyLoading || historyClearRequest) return;
+  const request={};historyLoading=request;
   const generation=historyGeneration, device=$('history-device').value;
   try {
     const data=await api('/api/history?device='+encodeURIComponent(device)+'&before='+before);
-    if(generation!==historyGeneration || $('console').hidden) return;
+    if(generation!==historyGeneration || device!==$('history-device').value || $('console').hidden) return;
     historyCursor=before;historyNext=data.before;
     const options=[...$('history-device').options].map(o=>o.value);
     for(const value of data.devices) if(!options.includes(value)) {
@@ -108,7 +127,36 @@ async function loadHistory(before=0) {
     }
     $('history-note').textContent=data.write_error?'记录写入出现异常，请检查服务端数据目录和磁盘。':data.events.length?(before?'正在查看较早记录，点击“查看最新”返回。':'显示最近记录，每 2.5 秒刷新。'):'暂无记录。开始一次对话后，这里会显示识别文字、回复和处理状态。';
     $('history-older').disabled=!historyNext;
-  } finally {historyLoading=false;}
+  } finally {if(historyLoading===request)historyLoading=false;}
+}
+function historyControls(disabled) {
+  for(const id of ['history-device','history-refresh','history-clear']) $(id).disabled=disabled;
+  $('history-older').disabled=disabled || !historyNext;
+  $('history-clear').textContent=$('history-device').value?'清空该设备记录':'清空全部记录';
+}
+async function clearHistory() {
+  if(historyClearRequest || $('console').hidden) return;
+  const device=$('history-device').value;
+  const scope=device?'device':'all';
+  if(!confirm(`确定清空${device?'设备 '+device:'全部设备'}的全部聊天记录和上下文吗？对应设备当前的语音会话会结束，此操作无法撤销。`)) return;
+  const request={};historyClearRequest=request;
+  const generation=++historyGeneration;
+  historyLoading=false;historyControls(true);
+  $('history-note').textContent='正在清空记录并重置对应语音会话…';
+  try {
+    const result=await api('/api/history/clear',{method:'POST',body:{scope,device}});
+    if(generation!==historyGeneration || $('console').hidden) return;
+    historyCursor=historyNext=0;
+    $('history-events').replaceChildren();
+    message(`已清空 ${result.deleted} 条记录并重置上下文。`+(result.reset_pending?'部分语音连接尚未完成断开，请在设备上结束当前对话后重新开始。':'下一次对话将从新的上下文开始。'),!!result.reset_pending);
+  } catch(error) {
+    if(generation===historyGeneration && !$('console').hidden)message(error.message,true);
+  } finally {
+    if(historyClearRequest===request) {
+      historyClearRequest=null;historyControls(false);
+      if(generation===historyGeneration && !$('console').hidden)await loadHistory(historyCursor);
+    }
+  }
 }
 async function openConsole() {
   await loadSettings(); $('login-card').hidden = true; $('console').hidden = false;
@@ -132,7 +180,8 @@ document.querySelectorAll('.tab').forEach(button => button.addEventListener('cli
   document.querySelector('.save-bar').hidden = ['device-panel','history-panel'].includes(button.dataset.panel);
   if(button.dataset.panel==='history-panel') loadHistory(historyCursor).catch(error=>message(error.message,true));
 }));
-$('history-device').addEventListener('change',()=>{historyGeneration++;historyCursor=0;loadHistory().catch(error=>message(error.message,true));});
+$('history-device').addEventListener('change',()=>{historyGeneration++;historyLoading=false;historyCursor=historyNext=0;historyControls(false);loadHistory().catch(error=>message(error.message,true));});
+$('history-clear').addEventListener('click',()=>clearHistory().catch(error=>message(error.message,true)));
 $('history-refresh').addEventListener('click',()=>busy($('history-refresh'),()=>loadHistory()));
 $('history-older').addEventListener('click',()=>busy($('history-older'),()=>loadHistory(historyNext)));
 $('save').addEventListener('click', () => busy($('save'), async () => {
@@ -144,16 +193,20 @@ $('test-model').addEventListener('click', () => busy($('test-model'), async () =
   message(result.tool_call_returned ? '模型接口与工具调用测试通过。' : '接口可达，但未返回工具调用；请确认模型支持 tools。', !result.tool_call_returned);
 }));
 $('tts-provider').addEventListener('change',refreshTts);
-$('test-tts').addEventListener('click',()=>busy($('test-tts'),async()=>{
+async function testTts(mode) {
+  const generation=++previewGeneration;
   message('正在生成试听音频…');
-  const response=await fetch('/api/tts-test',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({tts_provider:$('tts-provider').value})});
+  const response=await fetch('/api/tts-test',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({tts_provider:$('tts-provider').value,preview_mode:mode})});
   if(!response.ok){if(response.status===401)showLogin();const text=await response.text();let error;try{error=JSON.parse(text).error;}catch{error=text;}throw new Error(error||'试听失败');}
   const audio=await response.blob();
-  if($('console').hidden)return;
+  if($('console').hidden || generation!==previewGeneration)return;
   if(previewUrl)URL.revokeObjectURL(previewUrl);
   previewUrl=URL.createObjectURL(audio);$('tts-preview').src=previewUrl;$('tts-preview').hidden=false;
+  $('download-tts').href=previewUrl;$('download-tts').download=`tts-preview-${mode}.${audio.type==='audio/wav'?'wav':'mp3'}`;$('download-tts').hidden=false;
   await $('tts-preview').play().catch(()=>{});message('试听已生成，可点击播放器播放。切换语音方式后请保存并应用。');
-}));
+}
+$('test-tts').addEventListener('click',()=>busy($('test-tts'),()=>testTts('source')));
+$('test-tts-opus').addEventListener('click',()=>busy($('test-tts-opus'),()=>testTts('opus')));
 $('device-form').addEventListener('submit', event => {
   event.preventDefault(); busy(event.submitter, async () => {
     invalidateConnection();

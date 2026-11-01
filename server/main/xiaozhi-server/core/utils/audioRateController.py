@@ -92,6 +92,15 @@ class AudioRateController:
             return 0
         return (time.monotonic() - self.start_timestamp) * 1000
 
+    def rebase_if_empty(self):
+        """A resumed sentence must not catch up against an old send deadline."""
+        if self.queue or not self.queue_empty_event.is_set():
+            return False
+        self.play_position = 0
+        self.start_timestamp = None
+        self._last_queue_empty_time = time.monotonic()
+        return True
+
     async def check_queue(self, send_audio_callback):
         """
         检查队列并按时发送音频/消息
@@ -99,6 +108,7 @@ class AudioRateController:
         Args:
             send_audio_callback: 发送音频的回调函数 async def(opus_packet)
         """
+        sent_audio = False
         while self.queue:
             item = self.queue[0]
             item_type = item[0]
@@ -143,6 +153,7 @@ class AudioRateController:
                 # 时间已到，从队列移除并发送
                 self.queue.popleft()
                 self.play_position += self.interval_ms
+                sent_audio = True
                 try:
                     await send_audio_callback(opus_packet)
                 except Exception as e:
@@ -152,7 +163,8 @@ class AudioRateController:
         # 队列处理完后清除事件
         self.queue_empty_event.set()
         self.queue_has_data_event.clear()
-        self._last_queue_empty_time = time.monotonic()  # 记录队列清空时间
+        if sent_audio:
+            self._last_queue_empty_time = time.monotonic()  # 仅在实际发送过音频包后更新队列清空时间
 
     def start_sending(self, send_audio_callback):
         """

@@ -46,10 +46,24 @@ Application::Application() : notify_player_(audio_service_) {
                                                 .name = "clock_timer",
                                                 .skip_unhandled_events = true};
     esp_timer_create(&clock_timer_args, &clock_timer_handle_);
+    esp_timer_create_args_t stop_timer = {
+        .callback =
+            [](void* context) {
+                auto app = static_cast<Application*>(context);
+                xEventGroupSetBits(app->event_group_, MAIN_EVENT_SPEECH_STOP_READY);
+            },
+        .arg = this,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "speech_drain",
+        .skip_unhandled_events = true,
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&stop_timer, &speech_stop_timer_));
 }
 
 Application::~Application() {
     notify_player_.Stop();
+    esp_timer_stop(speech_stop_timer_);
+    esp_timer_delete(speech_stop_timer_);
     if (clock_timer_handle_ != nullptr) {
         esp_timer_stop(clock_timer_handle_);
         esp_timer_delete(clock_timer_handle_);
@@ -192,7 +206,8 @@ void Application::Run() {
         MAIN_EVENT_VAD_CHANGE | MAIN_EVENT_CLOCK_TICK | MAIN_EVENT_ERROR |
         MAIN_EVENT_NETWORK_CONNECTED | MAIN_EVENT_NETWORK_DISCONNECTED | MAIN_EVENT_TOGGLE_CHAT |
         MAIN_EVENT_START_LISTENING | MAIN_EVENT_STOP_LISTENING | MAIN_EVENT_ACTIVATION_DONE |
-        MAIN_EVENT_STATE_CHANGED | MAIN_EVENT_PLAYBACK_DRAINED | MAIN_EVENT_STARTUP_HINT_TIMEOUT;
+        MAIN_EVENT_STATE_CHANGED | MAIN_EVENT_PLAYBACK_DRAINED | MAIN_EVENT_STARTUP_HINT_TIMEOUT |
+        MAIN_EVENT_SPEECH_STOP_READY;
 
     while (true) {
         auto bits = xEventGroupWaitBits(event_group_, ALL_EVENTS, pdTRUE, pdFALSE, portMAX_DELAY);
@@ -223,6 +238,8 @@ void Application::Run() {
         }
 
         if (bits & MAIN_EVENT_PLAYBACK_DRAINED) {
+            if (pending_speech_stop_)
+                RequestSpeechStop();
             if (audio_service_.IsPlaybackIdle()) {
                 notify_player_.OnPlaybackDrained();
             }
@@ -234,6 +251,9 @@ void Application::Run() {
                 StartListeningAudio();
             }
         }
+
+        if (bits & MAIN_EVENT_SPEECH_STOP_READY)
+            CompleteSpeechStop();
 
         if (bits & MAIN_EVENT_TOGGLE_CHAT) {
             HandleToggleChatEvent();
@@ -585,7 +605,10 @@ void Application::InitializeProtocol() {
     });
 
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
-        if (GetDeviceState() == kDeviceStateSpeaking) {
+        const bool accepted =
+            audio_service_.NetworkPlaybackActive() || GetDeviceState() == kDeviceStateSpeaking;
+        audio_service_.RecordNetworkPacket(*packet, accepted);
+        if (accepted) {
             audio_service_.PushPacketToDecodeQueue(std::move(packet));
         }
     });
@@ -655,20 +678,17 @@ void Application::InitializeProtocol() {
                 return;
             }
             if (strcmp(state->valuestring, "start") == 0) {
+                // Prepare before returning to the ordered transport callbacks.
+                // Early packets must survive the later main-task state change.
+                audio_service_.BeginNetworkPlayback();
                 Schedule([this]() {
+                    CancelSpeechStop();
                     aborted_ = false;
                     SetDeviceState(kDeviceStateSpeaking);
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
-                Schedule([this]() {
-                    if (GetDeviceState() == kDeviceStateSpeaking) {
-                        if (listening_mode_ == kListeningModeManualStop) {
-                            SetDeviceState(kDeviceStateIdle);
-                        } else {
-                            SetDeviceState(kDeviceStateListening);
-                        }
-                    }
-                });
+                audio_service_.EndNetworkPlayback();
+                Schedule([this]() { RequestSpeechStop(); });
             } else if (strcmp(state->valuestring, "sentence_start") == 0) {
                 auto text = cJSON_GetObjectItem(root, "text");
                 if (cJSON_IsString(text)) {
@@ -1024,8 +1044,43 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
 #endif
 }
 
+void Application::CancelSpeechStop() {
+    pending_speech_stop_ = speech_stop_timer_armed_ = false;
+    speech_stop_deadline_us_ = 0;
+    esp_timer_stop(speech_stop_timer_);
+    xEventGroupClearBits(event_group_, MAIN_EVENT_SPEECH_STOP_READY);
+}
+
+void Application::RequestSpeechStop() {
+    if (GetDeviceState() != kDeviceStateSpeaking)
+        return;
+    pending_speech_stop_ = true;
+    if (!speech_stop_timer_armed_ && audio_service_.IsPlaybackIdle()) {
+        speech_stop_timer_armed_ = true;
+        speech_stop_deadline_us_ = esp_timer_get_time() + audio_service_.OutputDrainMs() * 1000;
+        ESP_ERROR_CHECK(
+            esp_timer_start_once(speech_stop_timer_, audio_service_.OutputDrainMs() * 1000));
+    }
+}
+
+void Application::CompleteSpeechStop() {
+    // An already-delivered timer bit from an aborted turn may still be in the
+    // main loop's local event snapshot. It must not finish a newly armed turn.
+    if (speech_stop_timer_armed_ && esp_timer_get_time() < speech_stop_deadline_us_)
+        return;
+    speech_stop_timer_armed_ = false;
+    if (!pending_speech_stop_ || GetDeviceState() != kDeviceStateSpeaking ||
+        !audio_service_.IsPlaybackIdle())
+        return;
+    pending_speech_stop_ = false;
+    SetDeviceState(listening_mode_ == kListeningModeManualStop ? kDeviceStateIdle
+                                                               : kDeviceStateListening);
+}
+
 void Application::HandleStateChangedEvent() {
     DeviceState new_state = state_machine_.GetState();
+    if (new_state != kDeviceStateSpeaking)
+        CancelSpeechStop();
     clock_ticks_ = 0;
     // Any state change invalidates a pending deferred listening start;
     // the Listening case below re-arms it when needed.
@@ -1089,7 +1144,7 @@ void Application::HandleStateChangedEvent() {
                 // Only AFE wake word can be detected in speaking mode
                 audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
             }
-            audio_service_.ResetDecoder();
+            audio_service_.ResetDecoder(true);
             break;
         case kDeviceStateNotifying:
             display->SetStatus(Lang::Strings::SPEAKING);
@@ -1281,6 +1336,8 @@ void Application::Schedule(std::function<void()>&& callback) {
 void Application::AbortSpeaking(AbortReason reason) {
     ESP_LOGI(TAG, "Abort speaking");
     aborted_ = true;
+    CancelSpeechStop();
+    audio_service_.EndNetworkPlayback();
     if (protocol_) {
         protocol_->SendAbortSpeaking(reason);
     }

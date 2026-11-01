@@ -18,6 +18,28 @@ HAS_RUNTIME=all(importlib.util.find_spec(name) for name in ('funasr','sherpa_onn
 
 @unittest.skipUnless(HAS_RUNTIME,'Full voice dependencies are tested inside the Docker image')
 class TtsLifecycleTests(unittest.TestCase):
+    def test_base_encoder_resets_once_per_turn_and_ignores_stale_first_markers(self):
+        import queue
+        from core.providers.tts.base import TTSProviderBase
+        from core.providers.tts.dto.dto import TTSMessageDTO,SentenceType,ContentType
+        class Base(TTSProviderBase):
+            async def text_to_speak(self,text,output_file):return b''
+        tts=Base({},True)
+        conn=types.SimpleNamespace(stop_event=threading.Event(),client_abort=False,sentence_id='a')
+        tts.conn=conn
+        resets=[]
+        tts.opus_encoder=types.SimpleNamespace(reset_state=lambda:resets.append(conn.sentence_id))
+        messages=[TTSMessageDTO(value,SentenceType.FIRST,ContentType.ACTION) for value in ('a','a','stale','b')]
+        class TextQueue:
+            def get(self,timeout):
+                if not messages:conn.stop_event.set();raise queue.Empty
+                message=messages.pop(0)
+                if message.sentence_id=='b':conn.sentence_id='b'
+                return message
+        tts.tts_text_queue=TextQueue()
+        tts.tts_text_priority_thread()
+        self.assertEqual(resets,['a','b'])
+
     def test_timeouts_are_bounded_end_failed_turn_once_and_allow_the_next_turn(self):
         from core.providers.tts.base import TTSProviderBase
         from core.providers.tts.dto.dto import SentenceType

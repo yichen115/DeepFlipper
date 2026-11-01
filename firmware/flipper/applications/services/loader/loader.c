@@ -1,6 +1,8 @@
 #include "loader.h"
 #include "loader_i.h"
 #include <deepflipper/deepflipper.h>
+#include <deepflipper/deepflipper_i.h>
+#include <rpc/rpc.h>
 #include <applications.h>
 #include <storage/storage.h>
 #include <furi_hal.h>
@@ -40,6 +42,13 @@ static const char* loader_find_external_application_by_name(const char* app_name
 
 // API
 
+static bool loader_caller_is_rpc(void) {
+    // Record this on the caller, before queuing to Loader. Even a native
+    // app.open without RPC arguments must not tear down its own waiting session.
+    const char* name = furi_thread_get_name(furi_thread_get_current_id());
+    return name && strcmp(name, RPC_SESSION_THREAD_NAME) == 0;
+}
+
 static LoaderMessageLoaderStatusResult loader_start_internal(
     Loader* loader,
     const char* name,
@@ -52,6 +61,7 @@ static LoaderMessageLoaderStatusResult loader_start_internal(
     message.start.name = name;
     message.start.args = args;
     message.start.error_message = error_message;
+    message.start.keep_rpc = loader_caller_is_rpc();
     message.api_lock = api_lock_alloc_locked();
     message.status_value = &result;
     furi_message_queue_put(loader->queue, &message, FuriWaitForever);
@@ -218,6 +228,7 @@ void loader_start_detached_with_gui_error(Loader* loader, const char* name, cons
         .type = LoaderMessageTypeStartByNameDetachedWithGuiError,
         .start.name = strdup(name),
         .start.args = args ? strdup(args) : NULL,
+        .start.keep_rpc = loader_caller_is_rpc(),
     };
     furi_message_queue_put(loader->queue, &message, FuriWaitForever);
 }
@@ -841,11 +852,19 @@ static void loader_do_check_loading(Loader* loader) {
     }
 }
 
+static bool loader_prepare_deepflipper(bool keep_rpc, const char* args) {
+    if(!deepflipper_prepare_app_start()) return false;
+    // RPC-origin launches must retain their own command session, including
+    // native app.open calls without an "RPC" argument.
+    return keep_rpc || loader_do_args_are_rpc(args) || deepflipper_app_suspend_uart();
+}
+
 static LoaderMessageLoaderStatusResult loader_do_start_by_name(
     Loader* loader,
     const char* name,
     const char* args,
-    FuriString* error_message) {
+    FuriString* error_message,
+    bool keep_rpc) {
     LoaderMessageLoaderStatusResult status;
     bool assistant_prepared = false;
     status.value = loader_make_success_status(error_message);
@@ -881,10 +900,10 @@ static LoaderMessageLoaderStatusResult loader_do_start_by_name(
 
         LoaderEvent event;
         event.type = LoaderEventTypeApplicationBeforeLoad;
-        if(!deepflipper_prepare_app_start()) {
+        if(!loader_prepare_deepflipper(keep_rpc, args)) {
             deepflipper_app_finished();
             status.value = loader_make_status_error(
-                LoaderStatusErrorInternal, error_message, "AI task is stopping; try again");
+                LoaderStatusErrorInternal, error_message, "AI command is stopping; try again");
             break;
         }
         assistant_prepared = true;
@@ -995,7 +1014,7 @@ static bool loader_do_deferred_launch(Loader* loader, LoaderDeferredLaunchRecord
         FURI_LOG_I(TAG, "Deferred launch: %s", app_name_str);
 
         LoaderMessageLoaderStatusResult result =
-            loader_do_start_by_name(loader, app_name_str, app_args, error_message);
+            loader_do_start_by_name(loader, app_name_str, app_args, error_message, false);
         if(result.value == LoaderStatusOk) {
             is_successful = true;
             break;
@@ -1092,7 +1111,7 @@ int32_t loader_srv(void* p) {
     if((furi_hal_rtc_get_boot_mode() == FuriHalRtcBootModeNormal) && FLIPPER_AUTORUN_APP_NAME &&
        strlen(FLIPPER_AUTORUN_APP_NAME)) {
         FURI_LOG_I(TAG, "Starting autorun app: %s", FLIPPER_AUTORUN_APP_NAME);
-        loader_do_start_by_name(loader, FLIPPER_AUTORUN_APP_NAME, NULL, NULL);
+        loader_do_start_by_name(loader, FLIPPER_AUTORUN_APP_NAME, NULL, NULL, false);
     }
 
     LoaderMessage message;
@@ -1104,7 +1123,8 @@ int32_t loader_srv(void* p) {
                     loader,
                     message.start.name,
                     message.start.args,
-                    message.start.error_message); //-V595
+                    message.start.error_message,
+                    message.start.keep_rpc); //-V595
                 *(message.status_value) = status;
                 if(status.value != LoaderStatusOk) loader_do_emit_queue_empty_event(loader);
                 api_lock_unlock(message.api_lock);
@@ -1113,7 +1133,8 @@ int32_t loader_srv(void* p) {
             case LoaderMessageTypeStartByNameDetachedWithGuiError: {
                 FuriString* error_message = furi_string_alloc();
                 LoaderMessageLoaderStatusResult status = loader_do_start_by_name(
-                    loader, message.start.name, message.start.args, error_message); //-V595
+                    loader, message.start.name, message.start.args, error_message,
+                    message.start.keep_rpc); //-V595
                 loader_show_gui_error(status, message.start.name, error_message);
                 if(status.value != LoaderStatusOk) loader_do_emit_queue_empty_event(loader);
                 if(message.start.name) free((void*)message.start.name);

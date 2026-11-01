@@ -126,6 +126,11 @@ function applySettings(data,options={}) {
 async function load(options={}) {applySettings(await api('/api/settings'),options);}
 function render(data) {
   live=data;
+  if($('audio-stream-diagnostics')) $('audio-stream-diagnostics').textContent=data.audio_stream?JSON.stringify(data.audio_stream,null,2):'请更新 ESP32 固件以查看流式音频诊断。';
+  if($('audio-stream-summary')) {
+    const a=data.audio_stream;
+    $('audio-stream-summary').textContent=!a?.turn?'完成一次对话后显示本轮统计。':`第 ${a.turn} 轮：${a.source_rate||'—'} Hz / ${a.frame_ms||'—'} ms，收到 ${a.packets} 包，状态丢弃 ${a.state_drops}，队列丢弃 ${a.queue_drops}，解码错误 ${a.decode_errors}，重采样错误 ${a.resample_errors}。最大来包间隔 ${a.rx_gap_max_ms} ms，最长解码 ${a.decode_max_ms} ms，本轮最大输出等待 ${a.output_gap_max_ms} ms；断粮后重新缓冲 ${a.starvation_events??'—'} 次，最长额外等待 ${a.starvation_max_ms??'—'} ms；本轮输出约 ${(a.played_ms/1000).toFixed(1)} 秒。`;
+  }
   $('flipper-state').textContent=uartState(data);
   if($('uart-diagnostics')) $('uart-diagnostics').textContent=data.uart?JSON.stringify(data.uart,null,2):'当前 ESP32 固件尚未提供诊断信息，请更新 ESP32 固件。';
   $('wifi-state').textContent=(labels[data.wifi]||data.wifi)+(data.ssid?' · '+data.ssid:'');

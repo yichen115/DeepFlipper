@@ -13,7 +13,23 @@ from core.utils.audioRateController import AudioRateController
 
 TAG = __name__
 AUDIO_FRAME_DURATION = 60  # 音频帧时长（毫秒），与 Opus 编码 60ms/帧对齐
-PRE_BUFFER_COUNT = 4  # 240 ms of initial audio to tolerate Wi-Fi jitter.
+PRE_BUFFER_COUNT = 8  # 480 ms, including the observed 397 ms delivery gap.
+
+
+def _prime_after_pause(conn):
+    if getattr(conn, 'config', {}).get('tts_audio_send_delay', 0) > 0:
+        return
+    flow = getattr(conn, 'audio_flow_control', {})
+    if flow.get('sentence_id') != conn.sentence_id:
+        return
+    previous = flow.get('last_send_time')
+    controller = getattr(conn, 'audio_rate_controller', None)
+    if (previous is not None and not flow.get('pause_primed') and controller is not None
+            and time.monotonic() - previous >= PRE_BUFFER_COUNT * AUDIO_FRAME_DURATION / 1000
+            and controller.rebase_if_empty()):
+        flow['prebuffer_remaining'] = PRE_BUFFER_COUNT
+        flow['refill_bursts'] = flow.get('refill_bursts', 0) + 1
+        flow['pause_primed'] = True
 
 
 async def sendAudioMessage(conn: "ConnectionHandler", sentenceType, audios, text, sentence_id=None):
@@ -26,6 +42,7 @@ async def sendAudioMessage(conn: "ConnectionHandler", sentenceType, audios, text
         conn.tts.tts_audio_first_sentence = False
 
     if sentenceType == SentenceType.FIRST:
+        _prime_after_pause(conn)
         # 同一句子的后续消息加入流控队列，其他情况立即发送
         if (
             hasattr(conn, "audio_rate_controller")
@@ -196,6 +213,8 @@ def _get_or_create_rate_controller(
             "packet_count": 0,
             "sequence": 0,
             "sentence_id": conn.sentence_id,
+            "prebuffer_remaining": PRE_BUFFER_COUNT,
+            "refill_bursts": 0,
         }
 
         # 启动后台发送循环
@@ -241,6 +260,7 @@ async def _send_audio_with_rate_control(
         flow_control: 流控状态
         send_delay_ms: 自定义发送间隔（毫秒）。
     """
+    _prime_after_pause(conn)
     for packet in audio_list:
         if conn.client_abort:
             return
@@ -252,8 +272,9 @@ async def _send_audio_with_rate_control(
             rate_controller.add_audio(packet)
         else:
             # 默认节奏模式（60ms/包）：前 N 包预缓冲直接发，后续入队由后台任务按 interval_ms 节奏发
-            if flow_control["packet_count"] < PRE_BUFFER_COUNT:
+            if flow_control.get("prebuffer_remaining", 0) > 0:
                 await _do_send_audio(conn, packet, flow_control)
+                flow_control["prebuffer_remaining"] -= 1
             else:
                 rate_controller.add_audio(packet)
 
@@ -274,7 +295,18 @@ async def _do_send_audio(conn: "ConnectionHandler", opus_packet, flow_control):
         # 直接发送opus数据包
         await conn.websocket.send(opus_packet)
 
+    capture = getattr(conn, 'audio_test_packets', None)
+    if capture is not None and len(capture) < 500:
+        capture.append(bytes(opus_packet))
+
     # 更新流控状态
+    now = time.monotonic()
+    previous = flow_control.get('last_send_time')
+    if previous is not None:
+        flow_control['max_send_gap_ms'] = max(flow_control.get('max_send_gap_ms', 0),
+                                             round((now - previous) * 1000))
+    flow_control['last_send_time'] = now
+    flow_control['pause_primed'] = False
     flow_control["packet_count"] = packet_index + 1
     flow_control["sequence"] = sequence + 1
 

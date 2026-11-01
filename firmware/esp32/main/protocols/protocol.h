@@ -14,6 +14,7 @@ struct AudioStreamPacket {
     uint32_t playback_id = 0;
     uint32_t media_position_ms = 0;
     std::vector<uint8_t> payload;
+    uint32_t network_turn = 0;  // Local playback ownership; never serialized on the wire.
 };
 
 struct BinaryProtocol2 {

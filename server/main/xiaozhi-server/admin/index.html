@@ -27,7 +27,7 @@
             <label class="check"><input id="clear-key" type="checkbox">清除已保存的 API Key</label>
             <button id="test-model" class="secondary" type="button">测试接口与工具调用</button><small class="note">测试会向模型发送一次简短请求，不执行任何硬件操作。</small>
           </article>
-          <aside class="card"><h2>语音链路</h2><dl><dt>语音识别</dt><dd id="asr-name">—</dd><dt>语音合成</dt><dd id="tts-name">—</dd></dl><label for="tts-provider">语音合成方式</label><select id="tts-provider"><option value="LocalTTS">本地 MeloTTS（CPU，无需联网）</option><option value="EdgeTTS">EdgeTTS（微软在线服务）</option></select><p id="tts-hint">本地模型首次需要单独下载，之后离线合成。DeepSeek 生成回答仍需要模型 API。</p><label for="tts-voice">EdgeTTS 音色</label><input id="tts-voice" placeholder="zh-CN-XiaoxiaoNeural" maxlength="128"><button id="test-tts" class="secondary" type="button">试听所选语音</button><audio id="tts-preview" controls hidden></audio><p>试听在当前浏览器播放；切换后点击下方“保存并应用”，设备对话才会使用所选方式。设备网络、音量和麦克风在 ESP32 网页设置。</p><div class="callout">API Key 保存在本机配置中，页面只显示是否已配置，不会读回密钥。</div></aside>
+          <aside class="card"><h2>语音链路</h2><dl><dt>语音识别</dt><dd id="asr-name">—</dd><dt>语音合成</dt><dd id="tts-name">—</dd></dl><label for="tts-provider">语音合成方式</label><select id="tts-provider"><option value="LocalTTS">本地 MeloTTS（CPU，无需联网）</option><option value="EdgeTTS">EdgeTTS（微软在线服务）</option></select><p id="tts-hint">本地模型首次需要单独下载，之后离线合成。DeepSeek 生成回答仍需要模型 API。</p><label for="tts-voice">EdgeTTS 音色</label><input id="tts-voice" placeholder="zh-CN-XiaoxiaoNeural" maxlength="128"><button id="test-tts" class="secondary" type="button">试听所选语音</button><button id="test-tts-opus" class="secondary" type="button">试听 Opus 还原</button><audio id="tts-preview" controls hidden></audio><a id="download-tts" download="tts-preview.wav" hidden>下载本次试听音频</a><p>原始试听与 Opus 还原可分别下载，再导入 ESP32 网页对比播放。两者都正常而对话卡顿时，重点看 ESP32 的“对话音频诊断”。试听在当前浏览器播放；切换后点击下方“保存并应用”，设备对话才会使用所选方式。设备网络、音量和麦克风在 ESP32 网页设置。</p><div class="callout">API Key 保存在本机配置中，页面只显示是否已配置，不会读回密钥。</div></aside>
         </div>
       </section>
       <section id="prompt-panel" class="panel" hidden>
@@ -41,7 +41,8 @@
       </section>
       <section id="history-panel" class="panel" hidden>
         <article class="card"><h2>对话记录</h2><p>按设备查看识别文字、模型回复和语音处理状态。回复文字不代表已经播放成功；语音连接断开也不等于 UART 断开。仅从升级后开始记录，保留最近 10000 条文字与状态，不保存原始录音。</p>
-          <div class="history-controls"><label for="history-device">设备</label><select id="history-device"><option value="">全部设备</option></select><button id="history-refresh" class="secondary" type="button">查看最新</button><button id="history-older" class="quiet" type="button" disabled>更早记录</button></div>
+          <div class="history-controls"><label for="history-device">设备</label><select id="history-device"><option value="">全部设备</option></select><button id="history-refresh" class="secondary" type="button">查看最新</button><button id="history-older" class="quiet" type="button" disabled>更早记录</button><button id="history-clear" class="danger" type="button">清空全部记录</button></div>
+          <p class="note">选择设备后可只清空该设备。清空会永久删除相应文字记录、重置对话上下文，并结束对应设备当前的语音会话；下次对话重新开始，模型设置和设备凭据保留。</p>
           <p id="history-note" class="note" role="status">读取中…</p><div id="history-events" aria-live="polite"></div>
         </article>
       </section>

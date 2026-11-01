@@ -75,6 +75,7 @@ typedef struct {
     const char* name;
     const char* args;
     FuriString* error_message;
+    bool keep_rpc;
 } LoaderMessageStartByName;
 
 typedef struct {

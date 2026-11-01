@@ -221,10 +221,16 @@ class ConnectionHandler:
             )
 
             self.device_id = self.headers.get("device-id", None)
+            self.websocket = ws
             try:
                 self.conversation_history = history_for(str(get_project_dir()))
+                self.history_revision = self.conversation_history.revision(self.device_id)
                 restored=await asyncio.to_thread(self.conversation_history.context,self.device_id,
                     self.headers.get('client-id',''),int(self.config.get('context_turns',6)))
+                if getattr(self, 'history_cleared', False) or not self.conversation_history.is_current(
+                        self.device_id, self.history_revision):
+                    self.history_cleared = True
+                    return
                 for message in restored:self.dialogue.put(Message(**message))
                 self.restored_context_messages=len(restored)
                 self.dialogue.observer = lambda message: record_message(self, message)
@@ -289,6 +295,9 @@ class ConnectionHandler:
 
     async def _save_and_close(self, ws):
         """保存记忆并关闭连接"""
+        if getattr(self, 'history_cleared', False):
+            await self.close(ws)
+            return
         try:
             # 守护线程1：独立生成标题（不依赖记忆模型）
             # 仅在服务端开启 chat_history 上报时才触发标题生成，
@@ -359,6 +368,10 @@ class ConnectionHandler:
 
     async def _route_message(self, message):
         """消息路由"""
+        if getattr(self, 'history_cleared', False):
+            return
+        if getattr(self, 'diagnostic_playback', False) and isinstance(message, bytes):
+            return  # A speaker-only test must not submit microphone data to ASR/LLM.
         # 检查是否已经获取到真实的绑定状态
         if not self.bind_completed_event.is_set():
             # 还没有获取到真实状态，等待直到获取到真实状态或超时
@@ -1065,6 +1078,8 @@ class ConnectionHandler:
         self.dialogue.update_system_message(self.prompt)
 
     def chat(self, query, depth=0):
+        if getattr(self, 'history_cleared', False):
+            return False
         # 保存当前任务的sentence_id到局部变量，避免被新任务覆盖
         current_sentence_id = None
 
@@ -1334,6 +1349,13 @@ class ConnectionHandler:
                     streamed_text = "".join(response_message)
                     self.tts.store_tts_text(current_sentence_id, streamed_text)
                     self.dialogue.put(Message(role="assistant", content=streamed_text))
+                    self.tts.tts_text_queue.put(
+                        TTSMessageDTO(
+                            sentence_id=current_sentence_id,
+                            sentence_type=SentenceType.MIDDLE,
+                            content_type=ContentType.ACTION,
+                        )
+                    )
                 response_message.clear()
 
                 # 收集所有工具调用的 Future

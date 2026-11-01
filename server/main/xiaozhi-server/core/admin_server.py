@@ -6,14 +6,16 @@ import os
 from pathlib import Path
 import re
 import secrets
+import sqlite3
 import time
+import uuid
 from urllib.parse import urlsplit
 
 from aiohttp import web
 
 from core.admin_config import AdminConfig, ConfigConflict, configured
 from core.auth import AuthManager
-from core.conversation_history import history_for
+from core.conversation_history import history_for, clear_conversations
 
 SESSION_KEY = web.RequestKey('admin_session', str) if hasattr(web, 'RequestKey') else 'admin_session'
 
@@ -32,6 +34,8 @@ class AdminServer:
         self.sessions = {}
         self.attempts = {}
         self.lock = asyncio.Lock()
+        self.audio_test_lock = asyncio.Lock()
+        self.audio_test_sample = None
         self.runner = None
 
     @web.middleware
@@ -66,7 +70,7 @@ class AdminServer:
         response.headers['X-Content-Type-Options'] = 'nosniff'
         response.headers['Content-Security-Policy'] = (
             "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; "
-            "img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+            "img-src 'self' data:; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
         return response
 
     async def body(self, request):
@@ -131,13 +135,31 @@ class AdminServer:
         result = await asyncio.to_thread(history_for(str(self.root)).read, device, before)
         return web.json_response(result)
 
+    async def clear_history(self, request):
+        payload = await self.body(request)
+        scope, device = payload.get('scope'), payload.get('device', '')
+        if scope not in ('all', 'device') or not isinstance(device, str) or len(device) > 80:
+            raise ValueError('请选择清空当前设备或全部设备')
+        if (scope == 'device' and not device) or (scope == 'all' and device):
+            raise ValueError('清空范围与设备不匹配')
+        async with self.lock:
+            try:
+                result = await clear_conversations(history_for(str(self.root)),
+                    self.runtime, device if scope == 'device' else None)
+            except (OSError, sqlite3.Error):
+                return web.json_response({'error': '清空记录失败，请检查服务端数据目录和磁盘'}, status=503)
+        return web.json_response({'ok': True, **result})
+
     async def test_tts(self, request):
-        from core.utils.modules_initialize import initialize_tts
         from core.tts_settings import LOCAL_TTS
         payload = await self.body(request)
         selected = payload.get('tts_provider', self.store.public()['tts_provider'])
+        preview_mode = payload.get('preview_mode', 'source')
+        if preview_mode not in ('source', 'opus'):
+            raise ValueError('不支持的音频试听模式')
         if selected not in ('LocalTTS', 'EdgeTTS'):
             raise ValueError('不支持的语音合成方式')
+        from core.utils.modules_initialize import initialize_tts
         _, config = self.store.read()
         config.setdefault('selected_module', {})['TTS'] = selected
         config.setdefault('TTS', {}).setdefault('LocalTTS', LOCAL_TTS.copy())
@@ -146,6 +168,12 @@ class AdminServer:
             audio = await asyncio.wait_for(tts.text_to_speak('你好，我是鲸鱼娘。语音测试成功。', None), 20)
             if not audio:
                 raise ValueError('语音合成没有返回音频')
+            if preview_mode == 'opus':
+                from core.audio_diagnostics import opus_preview
+                rate = config.get('xiaozhi', {}).get('audio_params', {}).get('sample_rate', 24000)
+                audio = await asyncio.to_thread(opus_preview, audio, tts.audio_file_type, rate)
+                return web.Response(body=audio, content_type='audio/wav', headers={
+                    'Content-Disposition': 'inline; filename="tts-preview-opus.wav"'})
             return web.Response(body=audio, content_type='audio/wav' if tts.audio_file_type == 'wav' else 'audio/mpeg')
         except FileNotFoundError:
             return web.json_response({'error': '缺少本地语音模型，请运行 python scripts/download_models.py --tts-only'}, status=409)
@@ -168,6 +196,94 @@ class AdminServer:
         return {'device_id': device, 'client_id': client, 'token': token,
                 'expires_in': manager.expire_seconds, 'issued_at': int(token.rsplit('.', 1)[1]),
                 'expires_at': int(token.rsplit('.', 1)[1]) + manager.expire_seconds}
+
+    async def stream_test(self, request):
+        payload = await self.body(request)
+        device = payload.get('device_id')
+        text = payload.get('text', '这是一段流式音频测试。我们正在检查声音是否连续、清晰，有没有停顿、重复和杂音。接下来继续播放一段较长的语音，让你有时间听出区别。这次只测试语音链路，不调用大模型，也不会执行任何设备工具。')
+        if not isinstance(device, str) or not device or len(device) > 80:
+            raise ValueError('请选择已连接的设备')
+        if not isinstance(text, str) or not 1 <= len(text.strip()) <= 300:
+            raise ValueError('测试文本须为 1–300 字')
+        if not isinstance(payload.get('segmented', False), bool):
+            raise ValueError('分句测试参数应为布尔值')
+        connections = list(getattr(getattr(self.runtime, 'server', None), 'connections', ()))
+        targets = [conn for conn in connections if getattr(conn, 'device_id', None) == device
+                   and not conn.stop_event.is_set()]
+        if len(targets) != 1 or not getattr(targets[0], 'tts', None):
+            return web.json_response({'error': '请先让该设备建立语音连接，再进行流式测试'}, status=409)
+        conn = targets[0]
+        if self.audio_test_lock.locked() or conn.client_is_speaking:
+            return web.json_response({'error': '设备正在播放，请结束当前对话后再测试'}, status=409)
+        from core.audio_diagnostics import prepare_opus_audio
+        from core.handle.sendAudioHandle import send_tts_message, sendAudio
+        async with self.audio_test_lock:
+            conn.diagnostic_playback = True
+            conn.client_abort = False
+            conn.asr_audio.clear()
+            conn.client_audio_buffer.clear()
+            started = False
+            try:
+                if payload.get('segmented'):
+                    from core.providers.tts.dto.dto import TTSMessageDTO, SentenceType, ContentType
+                    from core.audio_diagnostics import decode_opus_packets
+                    conn.audio_test_packets = []
+                    conn.sentence_id = uuid.uuid4().hex
+                    conn.client_is_speaking = True
+                    await send_tts_message(conn, 'start')
+                    started = True
+                    for kind, content, value in (
+                        (SentenceType.FIRST, ContentType.ACTION, None),
+                        (SentenceType.MIDDLE, ContentType.TEXT, text),
+                        (SentenceType.LAST, ContentType.ACTION, None),
+                    ):
+                        conn.tts.tts_text_queue.put(TTSMessageDTO(conn.sentence_id, kind, content, value))
+                    async def wait_playback():
+                        while conn.client_is_speaking:
+                            if conn.stop_event.is_set() or conn.client_abort:
+                                raise ValueError('分句测试已中止')
+                            await asyncio.sleep(0.05)
+                    await asyncio.wait_for(wait_playback(), 40)
+                    started = False
+                    packets = conn.audio_test_packets
+                    if not packets:
+                        raise ValueError('分句测试没有产生音频')
+                    self.audio_test_sample = await asyncio.to_thread(decode_opus_packets, packets, conn.sample_rate)
+                    return web.json_response({'ok': True, 'segmented': True, 'sample_kind': 'opus_decoded', 'packets': len(packets),
+                        'duration_ms': len(packets)*60, 'sample_rate': conn.sample_rate})
+                audio = await asyncio.wait_for(conn.tts.text_to_speak(text, None), 25)
+                wav, packets = await asyncio.to_thread(
+                    prepare_opus_audio, audio, conn.tts.audio_file_type, conn.sample_rate)
+                self.audio_test_sample = wav
+                conn.sentence_id = uuid.uuid4().hex
+                conn.client_abort = False
+                conn.client_is_speaking = True
+                await send_tts_message(conn, 'start')
+                started = True
+                await send_tts_message(conn, 'sentence_start', '音频链路测试（不执行设备操作）')
+                await sendAudio(conn, packets)
+                await send_tts_message(conn, 'stop')
+                started = False
+                return web.json_response({'ok': True, 'sample_kind': 'source', 'packets': len(packets),
+                    'duration_ms': len(packets)*60, 'sample_rate': conn.sample_rate})
+            except (TimeoutError, asyncio.TimeoutError):
+                return web.json_response({'error': '测试语音生成或传输超时'}, status=504)
+            finally:
+                if started:
+                    conn.client_abort = True
+                    conn.clear_queues()
+                    try:
+                        await asyncio.wait_for(send_tts_message(conn, 'stop'), 2)
+                    except Exception:
+                        pass
+                conn.diagnostic_playback = False
+                conn.audio_test_packets = None
+
+    async def stream_test_audio(self, request):
+        if not self.audio_test_sample:
+            raise web.HTTPNotFound(text='尚未生成流式测试样本')
+        return web.Response(body=self.audio_test_sample, content_type='audio/wav', headers={
+            'Content-Disposition': 'attachment; filename="stream-test-reference.wav"'})
 
     async def issue_token(self, request):
         result = self.device_credentials(await self.body(request))
@@ -236,7 +352,10 @@ class AdminServer:
             web.post('/api/logout', self.logout), web.get('/api/settings', self.settings),
             web.post('/api/settings', self.save), web.get('/api/status', self.status),
             web.get('/api/history', self.history),
+            web.post('/api/history/clear', self.clear_history),
             web.post('/api/tts-test', self.test_tts),
+            web.post('/api/tts-stream-test', self.stream_test),
+            web.get('/api/tts-stream-test/audio', self.stream_test_audio),
             web.post('/api/device-token', self.issue_token), web.post('/api/model-test', self.test_model),
             web.post('/api/connection-profile', self.connection_profile),
         ])

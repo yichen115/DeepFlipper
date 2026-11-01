@@ -191,6 +191,9 @@ def package(root, version, allow_dirty=False):
 
 {preview}鲸鱼娘系统桌面 + ESP32-S3 语音与配置网页 + Python 模型管理后台。
 提供硬件工具、对话上下文、红外学习／Sub-GHz RAW 采集和音频对比试听。
+手动启动正常应用前回收 AI 后台栈和 UART RPC 资源，退出后恢复；用于缓解 NFC 等应用内存不足。
+对话音频加入首包接收保护、启动缓冲和每轮诊断；服务端区分上下行采样率并提供同样本流式／缓冲对比。
+流式音频使用 480ms 启动／断粮恢复缓冲，TTS 编码器每轮同步重置；尾部等 PCM／I2S 排空后再切省电。
 完整能力和限制以对应版本 README 为准，不代表所有菜单均能由 AI 控制。
 
 - Flipper F7：qFlipper → Install from file，选 `{fz_name}`；TGZ 包含 SD 资源与工具 FAP。

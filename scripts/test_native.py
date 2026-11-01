@@ -8,6 +8,33 @@ ROOT=Path(__file__).resolve().parents[1]
 zig=Path(ziglang.__file__).parent/('zig.exe' if sys.platform=='win32' else 'zig')
 output=ROOT/'build/host'
 output.mkdir(parents=True,exist_ok=True)
+def extract(text, start, end, name):
+    begin=text.index(start)
+    (output/name).write_text(text[begin:text.index(end,begin)],encoding='utf-8')
+
+rpc_source=(ROOT/'firmware/flipper/applications/services/rpc/rpc.c').read_text(encoding='utf-8')
+extract(rpc_source,'typedef struct {\n    RpcSystemAlloc alloc;','\nstruct RpcSession', 'rpc-profile-production.inc')
+extract(rpc_source,'RpcSession* rpc_session_open(', '\nvoid rpc_session_close(', 'rpc-open-production.inc')
+extract(rpc_source,'static void rpc_session_thread_pending_callback(', '\nstatic void\n    rpc_session_thread_state_callback(', 'rpc-cleanup-production.inc')
+extract(rpc_source,'static bool rpc_session_lock(', '\nstatic int32_t rpc_session_worker(', 'rpc-lock-production.inc')
+extract(rpc_source,'bool rpc_local_app_lock(', '\nRpcOwner rpc_session_get_owner(', 'rpc-admission-production.inc')
+expansion_source=(ROOT/'firmware/flipper/applications/services/expansion/expansion_worker.c').read_text(encoding='utf-8')
+extract(expansion_source,'static void expansion_worker_rpc_terminated_callback(', '\nstatic bool expansion_worker_rpc_session_open(', 'expansion-terminated-production.inc')
+extract(expansion_source,'static void expansion_worker_rpc_session_close(', '\nstatic bool expansion_worker_handle_state_handshake(', 'expansion-close-production.inc')
+assistant=(ROOT/'firmware/flipper/applications/services/deepflipper/deepflipper.c').read_text(encoding='utf-8')
+extract(assistant,'static void deepflipper_resume_uart(', '\nstatic int32_t worker(', 'assistant-resume-production.inc')
+extract(assistant,'bool deepflipper_rpc_profile_enabled(', '\nstatic void fail(', 'assistant-profile-production.inc')
+extract(assistant,'static void deepflipper_worker_start(', '\nvoid deepflipper_on_system_start(', 'assistant-worker-production.inc')
+extract(assistant,'bool deepflipper_app_suspend_uart(', '\nbool deepflipper_prepare_app_start(', 'assistant-suspend-production.inc')
+extract(assistant,'void deepflipper_app_finished(', '\nbool deepflipper_module_command(', 'assistant-finish-production.inc')
+loader=(ROOT/'firmware/flipper/applications/services/loader/loader.c').read_text(encoding='utf-8')
+extract(loader,'static bool loader_prepare_deepflipper(', '\nstatic LoaderMessageLoaderStatusResult loader_do_start_by_name(', 'loader-prepare-production.inc')
+extract(loader,'static bool loader_caller_is_rpc(', '\nstatic LoaderMessageLoaderStatusResult loader_start_internal(', 'loader-caller-production.inc')
+for name in ('rpc_memory_test','assistant_memory_test'):
+    target=output/(name+('.exe' if sys.platform=='win32' else ''))
+    subprocess.run([str(zig),'cc','-std=gnu11','-Wall','-Wextra','-Werror','-I',str(output),str(ROOT/'tests'/f'{name}.c'),'-o',str(target)],check=True)
+    subprocess.run([str(target)],check=True)
+
 binary=output/('rpc_wire_test.exe' if sys.platform=='win32' else 'rpc_wire_test')
 with (output/'compile.log').open('w',encoding='utf-8') as log:
     compiled=subprocess.run([str(zig),'c++','-std=c++17','-Wall','-Wextra','-Werror',
@@ -32,10 +59,18 @@ subprocess.run([str(zig),'cc','-std=gnu11','-I',str(output),str(ROOT/'tests/tool
 subprocess.run([str(adapter_test)],check=True)
 
 audio_service=(ROOT/'firmware/esp32/main/audio/audio_service.cc').read_text(encoding='utf-8')
+extract(audio_service,'void AudioService::ResetDecoder(', '\nbool AudioService::IsPlaybackDrainedLocked(', 'network-playback-production.inc')
+network_playback=output/('network_playback_test.exe' if sys.platform=='win32' else 'network_playback_test')
+subprocess.run([str(zig),'c++','-std=c++17','-Wall','-Wextra','-Werror','-I',str(ROOT),'-I',str(output),str(ROOT/'tests/network_playback_test.cpp'),'-o',str(network_playback)],check=True)
+subprocess.run([str(network_playback)],check=True)
 begin=audio_service.index('bool AudioService::PushPcmToPlaybackQueue(')
 end=audio_service.index('std::unique_ptr<AudioStreamPacket> AudioService::PopPacketFromSendQueue(',begin)
 (output/'pcm-queue-production.inc').write_text(audio_service[begin:end],encoding='utf-8')
 application=(ROOT/'firmware/esp32/main/application.cc').read_text(encoding='utf-8')
+extract(application,'void Application::CancelSpeechStop(', '\nvoid Application::HandleStateChangedEvent(', 'speech-stop-production.inc')
+speech_stop=output/('speech_stop_test.exe' if sys.platform=='win32' else 'speech_stop_test')
+subprocess.run([str(zig),'c++','-std=c++17','-Wall','-Wextra','-Werror','-I',str(output),str(ROOT/'tests/speech_stop_test.cpp'),'-o',str(speech_stop)],check=True)
+subprocess.run([str(speech_stop)],check=True)
 begin=application.index('void Application::SuspendVoiceSession(')
 (output/'preview-suspend-production.inc').write_text(application[begin:],encoding='utf-8')
 for name in ('preview_session_test','pcm_queue_test','preview_suspend_test'):

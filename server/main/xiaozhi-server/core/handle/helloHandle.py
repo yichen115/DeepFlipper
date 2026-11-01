@@ -52,7 +52,12 @@ async def handleHelloMessage(conn: "ConnectionHandler", msg_json):
         format = audio_params.get("format")
         conn.logger.bind(tag=TAG).debug(f"客户端音频格式: {format}")
         conn.audio_format = format
-        conn.welcome_msg["audio_params"] = audio_params
+        # The client advertises its microphone format. The reply describes our
+        # separately configured TTS encoder, not an echo of the uplink rate.
+        conn.welcome_msg["audio_params"] = {
+            "format": format, "sample_rate": conn.sample_rate,
+            "channels": 1, "frame_duration": 60,
+        }
     features = msg_json.get("features")
     if features:
         conn.logger.bind(tag=TAG).debug(f"客户端特性: {features}")

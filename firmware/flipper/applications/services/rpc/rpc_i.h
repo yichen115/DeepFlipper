@@ -21,6 +21,10 @@ typedef struct {
     void* context;
 } RpcHandler;
 
+// Loader must not close a session whose request is waiting for Loader itself.
+bool rpc_local_app_lock(Rpc* rpc);
+void rpc_local_app_unlock(Rpc* rpc);
+
 void rpc_send(RpcSession* session, PB_Main* main_message);
 
 void rpc_send_and_release(RpcSession* session, PB_Main* main_message);

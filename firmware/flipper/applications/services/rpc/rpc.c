@@ -14,8 +14,10 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <m-dict.h>
+#include <stdatomic.h>
 
 #include <bt/bt_service/bt.h>
+#include <deepflipper/deepflipper_i.h>
 
 #define TAG "RpcSrv"
 
@@ -31,13 +33,15 @@ DICT_DEF2(RpcHandlerDict, pb_size_t, M_DEFAULT_OPLIST, RpcHandler, M_POD_OPLIST)
 typedef struct {
     RpcSystemAlloc alloc;
     RpcSystemFree free;
-    void* context;
+    bool uart_only;
+    bool full_session_only;
 } RpcSystemCallbacks;
 
-static RpcSystemCallbacks rpc_systems[] = {
+static const RpcSystemCallbacks rpc_systems[] = {
     {
         .alloc = rpc_deepflipper_alloc,
         .free = rpc_deepflipper_free,
+        .uart_only = true,
     },
     {
         .alloc = rpc_system_system_alloc,
@@ -70,10 +74,12 @@ static RpcSystemCallbacks rpc_systems[] = {
     {
         .alloc = rpc_gps_alloc,
         .free = rpc_gps_free,
+        .full_session_only = true,
     },
     {
         .alloc = rpc_network_alloc,
         .free = rpc_network_free,
+        .full_session_only = true,
     },
 };
 
@@ -85,7 +91,7 @@ struct RpcSession {
     RpcHandlerDict_t handlers;
     FuriStreamBuffer* stream;
     PB_Main* decoded_message;
-    bool terminate;
+    atomic_bool terminate;
     void** system_contexts;
     bool decode_error;
 
@@ -101,6 +107,14 @@ struct RpcSession {
 struct Rpc {
     FuriMutex* busy_mutex;
 };
+
+bool rpc_local_app_lock(Rpc* rpc) {
+    return furi_mutex_acquire(rpc->busy_mutex, furi_ms_to_ticks(100)) == FuriStatusOk;
+}
+
+void rpc_local_app_unlock(Rpc* rpc) {
+    furi_mutex_release(rpc->busy_mutex);
+}
 
 RpcOwner rpc_session_get_owner(RpcSession* session) {
     furi_check(session);
@@ -263,6 +277,17 @@ static bool rpc_pb_content_callback(pb_istream_t* stream, const pb_field_t* fiel
     return true;
 }
 
+static bool rpc_session_lock(RpcSession* session) {
+    while(!session->terminate) {
+        if(furi_mutex_acquire(session->rpc->busy_mutex, furi_ms_to_ticks(20)) == FuriStatusOk) {
+            if(!session->terminate) return true;
+            furi_mutex_release(session->rpc->busy_mutex);
+            break;
+        }
+    }
+    return false;
+}
+
 static int32_t rpc_session_worker(void* context) {
     furi_assert(context);
     RpcSession* session = (RpcSession*)context;
@@ -289,9 +314,12 @@ static int32_t rpc_session_worker(void* context) {
                 RpcHandlerDict_get(session->handlers, session->decoded_message->which_content);
 
             if(handler && handler->message_handler) {
-                furi_check(furi_mutex_acquire(rpc->busy_mutex, FuriWaitForever) == FuriStatusOk);
-                handler->message_handler(session->decoded_message, handler->context);
-                furi_check(furi_mutex_release(rpc->busy_mutex) == FuriStatusOk);
+                // A local app may hold the admission barrier while closing this
+                // session. Do not wait forever behind that barrier on shutdown.
+                if(rpc_session_lock(session)) {
+                    handler->message_handler(session->decoded_message, handler->context);
+                    furi_check(furi_mutex_release(rpc->busy_mutex) == FuriStatusOk);
+                }
             } else if(session->decoded_message->which_content == 0) {
                 /* Receiving zeroes means message is 0-length, which
                  * is valid for proto3: all fields are filled with default values.
@@ -365,7 +393,7 @@ static void rpc_session_thread_pending_callback(void* context, uint32_t arg) {
     RpcSession* session = (RpcSession*)context;
 
     for(size_t i = 0; i < COUNT_OF(rpc_systems); ++i) {
-        if(rpc_systems[i].free) {
+        if(rpc_systems[i].free && session->system_contexts[i]) {
             (rpc_systems[i].free)(session->system_contexts[i]);
         }
     }
@@ -374,16 +402,18 @@ static void rpc_session_thread_pending_callback(void* context, uint32_t arg) {
     RpcHandlerDict_clear(session->handlers);
     furi_stream_buffer_free(session->stream);
 
+    // Notify after ALL allocations (including the worker stack) are released.
+    // A transport waiting here may immediately admit a memory-heavy local app.
     furi_mutex_acquire(session->callbacks_mutex, FuriWaitForever);
-    if(session->terminated_callback) {
-        session->terminated_callback(session->context);
-    }
+    RpcSessionTerminatedCallback terminated = session->terminated_callback;
+    void* terminated_context = session->context;
     furi_mutex_release(session->callbacks_mutex);
 
     furi_mutex_free(session->callbacks_mutex);
     furi_thread_join(session->thread);
     furi_thread_free(session->thread);
     free(session);
+    if(terminated) terminated(terminated_context);
 }
 
 static void
@@ -411,8 +441,11 @@ RpcSession* rpc_session_open(Rpc* rpc, RpcOwner owner) {
     session->decoded_message->cb_content.arg = session;
 
     session->system_contexts = malloc(COUNT_OF(rpc_systems) * sizeof(void*));
+    const bool companion = owner == RpcOwnerUart && deepflipper_rpc_profile_enabled();
     for(size_t i = 0; i < COUNT_OF(rpc_systems); ++i) {
-        session->system_contexts[i] = rpc_systems[i].alloc(session);
+        const bool skip = (rpc_systems[i].uart_only && owner != RpcOwnerUart) ||
+                          (rpc_systems[i].full_session_only && companion);
+        session->system_contexts[i] = skip ? NULL : rpc_systems[i].alloc(session);
     }
 
     RpcHandler rpc_handler = {
@@ -422,7 +455,7 @@ RpcSession* rpc_session_open(Rpc* rpc, RpcOwner owner) {
     };
     rpc_add_handler(session, PB_Main_stop_session_tag, &rpc_handler);
 
-    session->thread = furi_thread_alloc_ex("RpcSessionWorker", 3072, rpc_session_worker, session);
+    session->thread = furi_thread_alloc_ex(RPC_SESSION_THREAD_NAME, 3072, rpc_session_worker, session);
 
     furi_thread_set_state_context(session->thread, session);
     furi_thread_set_state_callback(session->thread, rpc_session_thread_state_callback);
@@ -439,7 +472,10 @@ void rpc_session_close(RpcSession* session) {
     rpc_session_set_send_bytes_callback(session, NULL);
     rpc_session_set_close_callback(session, NULL);
     rpc_session_set_buffer_is_empty_callback(session, NULL);
+    FURI_CRITICAL_ENTER();
+    session->terminate = true;
     furi_thread_flags_set(furi_thread_get_id(session->thread), RpcEvtDisconnect);
+    FURI_CRITICAL_EXIT();
 }
 
 void rpc_on_system_start(void* p) {

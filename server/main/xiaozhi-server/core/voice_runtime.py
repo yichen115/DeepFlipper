@@ -94,7 +94,14 @@ class VoiceRuntime:
             client = getattr(handler, 'mcp_client', None)
             devices.append({'device_id': headers.get('device-id', ''),
                             'client_id': headers.get('client-id', ''),
-                            'tools': list(getattr(client, 'tools', {}))})
+                            'tools': list(getattr(client, 'tools', {})),
+                            'audio_tx': {
+                                'packets': getattr(handler, 'audio_flow_control', {}).get('packet_count', 0),
+                                'max_send_gap_ms': getattr(handler, 'audio_flow_control', {}).get('max_send_gap_ms', 0),
+                                'queued': len(getattr(getattr(handler, 'audio_rate_controller', None), 'queue', ())),
+                                'sample_rate': getattr(handler, 'sample_rate', 0),
+                                'refill_bursts': getattr(handler, 'audio_flow_control', {}).get('refill_bursts', 0),
+                            }})
         return {'state': self.state, 'error': self.error, 'devices': devices}
 
     async def close(self):
