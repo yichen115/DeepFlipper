@@ -10,7 +10,6 @@
 #define DF_SPK_BCLK GPIO_NUM_15
 #define DF_SPK_WS GPIO_NUM_16
 #define DF_SPK_DATA GPIO_NUM_7
-#define DF_LED_R GPIO_NUM_8
-#define DF_LED_G GPIO_NUM_9
-#define DF_LED_B GPIO_NUM_10
+// Single onboard (or external) GRB WS2812, driven with RMT.
+#define DF_LED_DATA GPIO_NUM_48
 #define DF_TALK_BUTTON GPIO_NUM_0

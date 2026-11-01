@@ -1,5 +1,4 @@
 #include "deepflipper_bridge.h"
-#include <driver/ledc.h>
 #include <esp_log.h>
 #include <esp_system.h>
 #include <esp_timer.h>
@@ -85,22 +84,7 @@ void DeepFlipperBridge::Start() {
     ESP_ERROR_CHECK(uart_param_config(kUart, &uart));
     ESP_ERROR_CHECK(
         uart_set_pin(kUart, DF_UART_TX, DF_UART_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
-    ledc_timer_config_t timer{};
-    timer.speed_mode = LEDC_LOW_SPEED_MODE;
-    timer.duty_resolution = LEDC_TIMER_10_BIT;
-    timer.timer_num = LEDC_TIMER_2;
-    timer.freq_hz = 4000;
-    timer.clk_cfg = LEDC_AUTO_CLK;
-    ESP_ERROR_CHECK(ledc_timer_config(&timer));
-    const gpio_num_t pins[] = {DF_LED_R, DF_LED_G, DF_LED_B};
-    for (int i = 0; i < 3; i++) {
-        ledc_channel_config_t c{};
-        c.gpio_num = pins[i];
-        c.speed_mode = LEDC_LOW_SPEED_MODE;
-        c.channel = static_cast<ledc_channel_t>(LEDC_CHANNEL_3 + i);
-        c.timer_sel = LEDC_TIMER_2;
-        ESP_ERROR_CHECK(ledc_channel_config(&c));
-    }
+    status_led_.Initialize();
     xTaskCreate([](void* arg) { static_cast<DeepFlipperBridge*>(arg)->Run(); }, "flipper_link",
                 6144, this, 3, &task_);
 }
@@ -754,11 +738,8 @@ void DeepFlipperBridge::UpdateLed() {
     }
     int peak = std::max({r, g, b, 1});
     const int channels[] = {r, g, b};
-    for (int i = 0; i < 3; i++) {
-        auto c = static_cast<ledc_channel_t>(LEDC_CHANNEL_3 + i);
-        ledc_set_duty(LEDC_LOW_SPEED_MODE, c, std::clamp(channels[i] * level / peak, 0, 1023));
-        ledc_update_duty(LEDC_LOW_SPEED_MODE, c);
-    }
+    status_led_.Set(channels[0] * level / peak, channels[1] * level / peak,
+                    channels[2] * level / peak);
 }
 
 void DeepFlipperBridge::Run() {

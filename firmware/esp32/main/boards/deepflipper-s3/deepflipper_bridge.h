@@ -12,6 +12,7 @@
 #include "led/led.h"
 #include "native_actions.h"
 #include "rpc_wire.h"
+#include "status_led.h"
 
 class DeepFlipperBridge : public Led, public dfnative::Transport {
 public:
@@ -88,6 +89,7 @@ private:
     std::string previous_disconnect_;
     int64_t last_heartbeat_us_ = 0;
     int64_t last_led_refresh_us_ = 0;
+    StatusLed status_led_;
     std::atomic<int> brightness_{12};
     bool tool_active_ = false;
     bool Frame(uint8_t type, const uint8_t* data, size_t size);

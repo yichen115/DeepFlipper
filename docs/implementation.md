@@ -15,7 +15,7 @@ is the target behavior, not a claim that all milestones have shipped.
 | Configuration | Authenticated ESP32 AP/LAN web setup, versioned NVS profile, temporary Wi-Fi trials, identity/config file exchange, periodic UART status and bounded shortcut commands |
 | Tools | 20 MCP tools: adds live NFC read, IR learning, OOK RAW capture, SD file read/space, clock and GPIO; app lifecycle, short/long keys, saved actions and query/cancel |
 | Application coexistence | Loader admission cancels assistant NFC and waits for release before normal app start |
-| ESP32 source | Dedicated S3 board, reference I2S audio, PWM RGB, local button, UART RPC/MCP bridge |
+| ESP32 source | Dedicated S3 board, reference I2S audio, GPIO48 WS2812, local button, UART RPC/MCP bridge |
 | Voice | Reuses XiaoZhi ASR/LLM/TTS transport; direct WS/WSS configuration bypasses managed OTA activation |
 | Animation linkage | State/emotion events and actual output PCM levels; no transcript/caption forwarding |
 | Module persistence | Single NVS profile plus restored driver settings; mute/zero-volume startup preserved |
@@ -42,9 +42,9 @@ is the target behavior, not a claim that all milestones have shipped.
   operation; those have separate playback/conversation actions.
 - The physical module switch and power-off UART isolation require hardware.
   The AI-session setting stops communication; it is not a physical power switch.
-- The default RGB reference is PWM/common-cathode; the suggested GL5050 part's
-  electrical details have not been established. LED sequencing still needs
-  hardware calibration; audio/LED thresholds are initial reference values.
+- The standard `deepflipper-s3` build drives one GRB WS2812 on GPIO48 using RMT
+  and the same status/brightness controls. Three-channel PWM RGB has been removed.
+  The actual LED pin, color order and low-brightness behavior require board testing.
 - Firmware update recovery, low-battery policy and global hardware resource
   compatibility beyond the initial NFC path need additional implementation/tests.
 - Normal mascot animation is replaced; existing blocking warnings and special

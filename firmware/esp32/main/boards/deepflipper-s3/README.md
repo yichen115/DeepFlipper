@@ -9,7 +9,8 @@ that every XiaoZhi/S3 development board has compatible wiring.
   lost established link latches 115200 until module reboot. Status exposes the
   selected rate/fallback; physical high-speed reliability is not yet verified.
 - I2S microphone and amp, separate input/output clocks, 16 kHz input/24 kHz output.
-- Single common-cathode RGB with per-channel resistors/drivers, three LEDC outputs.
+- One onboard or external GRB WS2812 on GPIO48 (RMT), leaving GPIO8/9/10 free.
+  Confirm the development board's LED pin; not every S3 board uses GPIO48.
 - GPIO0 active-low local talk button: click to start, click again to finish.
 - No local LCD/OLED or conversation captions. Flipper renders the character.
 - Direct WS/WSS device credentials; no managed OTA activation/configuration overwrite.
@@ -33,6 +34,11 @@ python scripts/build.py deepflipper-s3 --name deepflipper-s3
 
 On Windows, prefer project `scripts/build_esp32.ps1`, which runs that canonical
 entry through EIM and validates the actual build result before exporting files.
+The standard build exports to `build/release/esp32/` and always uses WS2812.
+Brightness and all existing status colors work through the same webpage/settings;
+zero brightness turns the light off.
+RMT writes run only from the bridge worker, are limited to 50 Hz and skip identical
+colors. LED initialization/write failure disables the light without resetting voice/UART.
 
 Device configuration runs at `http://192.168.4.1` on the protected setup AP and
 at the assigned device IP on LAN. Flipper **AI Assistant → Setup: …** shows

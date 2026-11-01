@@ -13,14 +13,18 @@ before powering or flashing. The firmware board ID is `deepflipper-s3`.
 | Module TX -> Flipper RX | top pin 14 / PB7 | 17 |
 | I2S mic WS / BCLK / data | not used | 4 / 5 / 6 |
 | I2S amp data / BCLK / WS | not used | 7 / 15 / 16 |
-| RGB R / G / B | not used | 8 / 9 / 10 |
+| WS2812 DIN (onboard or external) | not used | 48, one GRB pixel |
 | Local talk button | not used | 0, active-low (BOOT strap: do not hold during reset) |
 
 `firmware/esp32/main/boards/deepflipper-s3/config.h` owns this mapping. Microphone
 and amp should match the reference I2S codec configuration. Speaker requires a
-proper amp; RGB reference is a common-cathode LED with a separate resistor per
-color and any required current drivers. GL5050RGB01H-T is not confirmed as the
-selected part. A common-anode or addressable LED requires a matching driver.
+proper amp. The `deepflipper-s3` build drives one WS2812 through
+RMT on GPIO48; no LED wires are needed if the board already has this connection.
+It does not drive GPIO8/9/10. Some S3 boards instead use GPIO38; verify the board
+schematic. The S3 chip itself does not contain an RGB LED. Web brightness (0–100)
+controls the onboard light; zero sends black but does not cut its physical supply.
+External indicators also use WS2812 with DIN on GPIO48 and a rated supply/common
+ground; there is no three-channel PWM RGB driver. GPIO8/9/10 are free.
 
 The DeepFlipper speaker output now uses standard Philips I2S, 32-bit left/right
 slots with identical mono PCM in both. This avoids attenuating the signal when
