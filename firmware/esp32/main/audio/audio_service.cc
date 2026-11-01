@@ -628,6 +628,24 @@ bool AudioService::PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> pa
     return true;
 }
 
+bool AudioService::PushPcmToPlaybackQueue(std::vector<int16_t>& pcm) {
+    if (!codec_ || pcm.empty() || pcm.size() > size_t(codec_->output_sample_rate() * 60 / 1000))
+        return false;
+    std::lock_guard<std::mutex> guard(audio_queue_mutex_);
+    if (service_stopped_.load() || audio_playback_queue_.size() >= MAX_PLAYBACK_TASKS_IN_QUEUE)
+        return false;
+    AudioTask task;
+    task.type = kAudioTaskTypeDecodeToPlaybackQueue;
+    task.pcm = std::move(pcm);
+    task.timestamp = 0;
+    task.playback_id = 0;
+    task.media_position_ms = 0;
+    playback_drained_notified_ = false;
+    audio_playback_queue_.push_back(std::move(task));
+    audio_queue_cv_.notify_all();
+    return true;
+}
+
 std::unique_ptr<AudioStreamPacket> AudioService::PopPacketFromSendQueue() {
     std::lock_guard<std::mutex> lock(audio_queue_mutex_);
     if (audio_send_queue_.empty()) {

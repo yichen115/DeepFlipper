@@ -766,6 +766,13 @@ VLLM:
     model_name: lite
     api_key: 你的api_password
 TTS:
+  LocalTTS:
+    type: local_melo
+    model_dir: models/vits-melo-tts-zh_en
+    speaker_id: 0
+    speed: 1.0
+    num_threads: 2
+    output_dir: tmp/
   # 当前支持的type为edge、doubao，可自行适配
   EdgeTTS:
     # 定义TTS API类型

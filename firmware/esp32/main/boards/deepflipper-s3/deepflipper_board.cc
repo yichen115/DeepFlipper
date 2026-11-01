@@ -1,6 +1,9 @@
+#include <esp_log.h>
 #include <esp_network.h>
+#include <esp_pm.h>
 #include <esp_sntp.h>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include "application.h"
 #include "board.h"
@@ -12,6 +15,7 @@
 #include "display/display.h"
 #include "mcp_server.h"
 #include "settings.h"
+#include "speaker_pcm.h"
 #include "system_info.h"
 
 class FlipperDisplay : public NoDisplay {
@@ -26,10 +30,37 @@ public:
 };
 
 class FlipperAudio : public NoAudioCodecSimplex {
+    std::array<int32_t, 512> speaker_slots_{};
+
+protected:
+    int Write(const int16_t* pcm, int samples) override {
+        std::lock_guard<std::mutex> guard(data_if_mutex_);
+        int written = 0;
+        while (written < samples) {
+            size_t frames = std::min<size_t>(samples - written, speaker_slots_.size() / 2);
+            dfspeaker::PackStereo(pcm + written, frames, output_volume_, speaker_slots_.data());
+            size_t bytes = 0;
+            esp_err_t result = i2s_channel_write(tx_handle_, speaker_slots_.data(), frames * 8,
+                                                 &bytes, portMAX_DELAY);
+            written += bytes / 8;
+            if (result != ESP_OK || bytes != frames * 8) {
+                ESP_LOGW("FlipperAudio", "I2S short write: error=%d bytes=%u", int(result),
+                         unsigned(bytes));
+                break;
+            }
+        }
+        return written;
+    }
+
 public:
     FlipperAudio()
         : NoAudioCodecSimplex(16000, 24000, DF_SPK_BCLK, DF_SPK_WS, DF_SPK_DATA, DF_MIC_BCLK,
-                              DF_MIC_WS, DF_MIC_DATA) {}
+                              DF_MIC_WS, DF_MIC_DATA) {
+        i2s_std_slot_config_t slots =
+            I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_STEREO);
+        slots.slot_mask = I2S_STD_SLOT_BOTH;
+        ESP_ERROR_CHECK(i2s_channel_reconfig_std_slot(tx_handle_, &slots));
+    }
     void Start() override {
         AudioCodec::Start();
         Settings settings("audio");
@@ -106,6 +137,87 @@ class DeepFlipperBoard : public Board {
                     [](const PropertyList& p) -> ReturnValue {
                         return DeepFlipperBridge::Get().Job(p["job"].value<int>());
                     });
+        auto capture = [](const char* kind, const PropertyList& p) -> ReturnValue {
+            auto args = cJSON_CreateObject();
+            cJSON_AddStringToObject(args, "kind", kind);
+            cJSON_AddNumberToObject(args, "timeout_ms", p["timeout_ms"].value<int>());
+            if (std::string(kind) == "subghz")
+                cJSON_AddNumberToObject(args, "frequency", p["frequency"].value<int>());
+            return Queue("native.capture", args);
+        };
+        mcp.AddTool("flipper_nfc_read",
+                    "Read a live card, return UID/type and public data preview; save .nfc. Type2 "
+                    "public pages are supported; encrypted/application data may be unavailable. "
+                    "Requires SD Tools adapter.",
+                    PropertyList({Property("timeout_ms", kPropertyTypeInteger, 5000, 250, 10000)}),
+                    [capture](const PropertyList& p) -> ReturnValue { return capture("nfc", p); });
+        mcp.AddTool("flipper_infrared_learn",
+                    "Learn one live IR button and save a .ir remote with button Captured. Raw "
+                    "carrier is assumed 38kHz. Use flipper_run_saved infrared to send it later.",
+                    PropertyList({Property("timeout_ms", kPropertyTypeInteger, 5000, 250, 10000)}),
+                    [capture](const PropertyList& p) -> ReturnValue { return capture("ir", p); });
+        mcp.AddTool(
+            "flipper_subghz_record",
+            "Receive internal-radio OOK650 RAW at an explicit frequency and save .sub; not "
+            "protocol decoding or proof of a valid replay. Use flipper_run_saved subghz to send "
+            "later.",
+            PropertyList(
+                {Property("frequency", kPropertyTypeInteger, 433920000, 300000000, 928000000),
+                 Property("timeout_ms", kPropertyTypeInteger, 5000, 250, 10000)}),
+            [capture](const PropertyList& p) -> ReturnValue { return capture("subghz", p); });
+        mcp.AddTool(
+            "flipper_read_file",
+            "Read up to 1024 bytes from SD as hex; use offset to continue. No file modification.",
+            PropertyList({Property("path", kPropertyTypeString).SetMaxLength(192),
+                          Property("offset", kPropertyTypeInteger, 0, 0, 10000000),
+                          Property("size", kPropertyTypeInteger, 512, 1, 1024)}),
+            [](const PropertyList& p) -> ReturnValue {
+                auto a = cJSON_CreateObject();
+                cJSON_AddStringToObject(a, "path", p["path"].value<std::string>().c_str());
+                cJSON_AddNumberToObject(a, "offset", p["offset"].value<int>());
+                cJSON_AddNumberToObject(a, "size", p["size"].value<int>());
+                return Queue("native.file.read", a);
+            });
+        mcp.AddTool("flipper_storage_info", "Read SD total/free space.",
+                    PropertyList({Property("path", kPropertyTypeString, "/ext").SetMaxLength(192)}),
+                    [](const PropertyList& p) -> ReturnValue {
+                        auto a = cJSON_CreateObject();
+                        cJSON_AddStringToObject(a, "path", p["path"].value<std::string>().c_str());
+                        return Queue("native.storage.info", a);
+                    });
+        mcp.AddTool(
+            "flipper_clock",
+            "Read or set Flipper RTC; setting needs all date/time fields including weekday (1..7).",
+            PropertyList({Property("action", kPropertyTypeString, "get"),
+                          Property("hour", kPropertyTypeInteger, 0, 0, 23),
+                          Property("minute", kPropertyTypeInteger, 0, 0, 59),
+                          Property("second", kPropertyTypeInteger, 0, 0, 59),
+                          Property("day", kPropertyTypeInteger, 1, 1, 31),
+                          Property("month", kPropertyTypeInteger, 1, 1, 12),
+                          Property("year", kPropertyTypeInteger, 2026, 2000, 2099),
+                          Property("weekday", kPropertyTypeInteger, 1, 1, 7)}),
+            [](const PropertyList& p) -> ReturnValue {
+                auto a = cJSON_CreateObject();
+                cJSON_AddStringToObject(a, "action", p["action"].value<std::string>().c_str());
+                for (auto key : {"hour", "minute", "second", "day", "month", "year", "weekday"})
+                    cJSON_AddNumberToObject(a, key, p[key].value<int>());
+                return Queue("native.clock", a);
+            });
+        mcp.AddTool("flipper_gpio",
+                    "Read/input/output/write one free expansion pin PC0 PC1 PC3 PB2 PB3 PA4 PA6 "
+                    "PA7. Output mode initializes low; writes require output mode. UART and power "
+                    "pins are excluded.",
+                    PropertyList({Property("pin", kPropertyTypeString),
+                                  Property("action", kPropertyTypeString, "read"),
+                                  Property("value", kPropertyTypeInteger, 0, 0, 1)}),
+                    [](const PropertyList& p) -> ReturnValue {
+                        auto a = cJSON_CreateObject();
+                        cJSON_AddStringToObject(a, "pin", p["pin"].value<std::string>().c_str());
+                        cJSON_AddStringToObject(a, "action",
+                                                p["action"].value<std::string>().c_str());
+                        cJSON_AddNumberToObject(a, "value", p["value"].value<int>());
+                        return Queue("native.gpio", a);
+                    });
         mcp.AddTool("flipper_job_cancel",
                     "Request cancellation; query the job for final stop/result status.",
                     PropertyList({Property("job", kPropertyTypeInteger, 1, 2147483647)}),
@@ -166,12 +278,16 @@ class DeepFlipperBoard : public Board {
                     PropertyList(),
                     [](const PropertyList&) -> ReturnValue { return Queue("native.app.exit"); });
         mcp.AddTool("flipper_press_button",
-                    "Deliver one short Flipper key event. Keys: up/down/right/left/ok/back. "
+                    "Deliver one short or logical long Flipper key event. Keys: "
+                    "up/down/right/left/ok/back. "
                     "Delivery is not proof of the menu action result. PIN lock is respected.",
-                    PropertyList({Property("key", kPropertyTypeString).SetMaxLength(5)}),
+                    PropertyList({Property("key", kPropertyTypeString).SetMaxLength(5),
+                                  Property("press_type", kPropertyTypeString, "short")}),
                     [](const PropertyList& p) -> ReturnValue {
                         auto args = cJSON_CreateObject();
                         cJSON_AddStringToObject(args, "key", p["key"].value<std::string>().c_str());
+                        cJSON_AddStringToObject(args, "press_type",
+                                                p["press_type"].value<std::string>().c_str());
                         return Queue("native.input", args);
                     });
         mcp.AddTool("flipper_alert",
@@ -203,22 +319,15 @@ class DeepFlipperBoard : public Board {
 
 public:
     DeepFlipperBoard() {
+#if CONFIG_PM_ENABLE
+        esp_pm_config_t power = {
+            .max_freq_mhz = 240, .min_freq_mhz = 80, .light_sleep_enable = false};
+        ESP_ERROR_CHECK(esp_pm_configure(&power));
+#endif
         DeviceSetup::Get().Initialize(SystemInfo::GetMacAddress(), GetUuid());
         DeepFlipperBridge::Get().RestoreSettings();
         DeepFlipperBridge::Get().Start();
-        talk_.OnClick([]() {
-            if (!DeepFlipperBridge::Get().MicrophoneEnabled() ||
-                !DeepFlipperBridge::Get().Linked() || !DeviceSetup::Get().Connected() ||
-                DeviceSetup::Get().Probing())
-                return;
-            auto& app = Application::GetInstance();
-            auto state = app.GetDeviceState();
-            if (state == kDeviceStateListening)
-                app.StopListening();
-            else if ((state == kDeviceStateIdle || state == kDeviceStateSpeaking) &&
-                     DeviceSetup::Get().ReadyToTalk())
-                app.StartListening();
-        });
+        talk_.OnClick([]() { DeviceSetup::Get().Talk(); });
         RegisterTools();
         talk_.OnLongPress([]() { DeviceSetup::Get().Recover(); });
     }

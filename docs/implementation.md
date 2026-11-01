@@ -13,7 +13,7 @@ is the target behavior, not a claim that all milestones have shipped.
 | UI/settings | English status/IP/setup-password/help and audio shortcuts; no long-text credentials entry; live updates preserve selection and refresh the setup address |
 | Passport | Whale-girl bust portraits with collar/shoulders for happy/normal/angry moods, without a separate whale emblem; original nickname, level and XP mechanics retained |
 | Configuration | Authenticated ESP32 AP/LAN web setup, versioned NVS profile, temporary Wi-Fi trials, identity/config file exchange, periodic UART status and bounded shortcut commands |
-| Tools | 13 MCP tools: status/info, NFC protocol scan, directory/apps, app lifecycle, short keys/alert, five saved-file action kinds, query/cancel |
+| Tools | 20 MCP tools: adds live NFC read, IR learning, OOK RAW capture, SD file read/space, clock and GPIO; app lifecycle, short/long keys, saved actions and query/cancel |
 | Application coexistence | Loader admission cancels assistant NFC and waits for release before normal app start |
 | ESP32 source | Dedicated S3 board, reference I2S audio, PWM RGB, local button, UART RPC/MCP bridge |
 | Voice | Reuses XiaoZhi ASR/LLM/TTS transport; direct WS/WSS configuration bypasses managed OTA activation |
@@ -30,8 +30,8 @@ is the target behavior, not a claim that all milestones have shipped.
   environment. The SDK is `D:\esp\v6.1\esp-idf`, tools are in
   `D:\Espressif\tools`, and the matching Python environment is selected by EIM.
   Actual board wiring, voice operation and power consumption remain untested.
-- Live card-specific reads/writes, RF/IR reception/learning, generic BLE/GATT,
-  GPIO/ADC/PWM tools and third-party app semantic actions remain unimplemented.
+- Full encrypted/application-specific card reads/writes, generic FSK decoding,
+  BLE/HID, ADC/PWM and arbitrary third-party app semantic actions remain unimplemented.
   Opening an app does not make its internal features into working AI tools.
 - Wi-Fi supports ordinary 2.4 GHz personal/open networks, scan/manual SSID and
   AP/LAN web configuration. Enterprise authentication, static IP and device OTA
@@ -306,6 +306,188 @@ Speaker/talk prerequisites explain muted, zero-volume, disabled-microphone,
 unconfigured, disconnected and busy states. These are compiled/simulated tests;
 real audio, radio and power behavior still require the board.
 
+## UART offline diagnosis
+
+The device reported UART offline while its AP was running. Review found a concrete
+session bug: the Flipper hardware-random uint32 session could exceed INT32_MAX,
+while ESP32 read cJSON.valueint, which saturates. The initial hello could succeed
+but all subsequent session-bound requests would fail. Session/command/remote-job
+IDs now use validated full-width numeric decoding. Tests exercise UINT32_MAX and
+both halves of the signed boundary with JSON echoing.
+
+Discovery now sends the same UART 0xAA presence byte as upstream expansion_test;
+the previous 10 ms GPIO-low break could trigger a peer framing-error exit and also
+unnecessarily rerouted the TX pin. Frame encoding is tested against Flipper's real
+C parser/encoder (compiled as C, preserving its empty-struct layout). Boot attempts
+log rate-limited handshake stage, RX byte/error counts and ACK status. Authenticated
+device status also exposes these diagnostics, never credentials. The UART0 console
+is independent from UART1 IO17/18; hardware notes now distinguish both pin groups.
+The user's qFlipper showed the custom 30 Oct 2026 build and AI ON/UART offline;
+USB was occupied by qFlipper and COM42 was denied while its console tool was open.
+No corrected firmware was flashed or a successful physical link claimed here.
+
+The subsequent single-RX tap captured repeated hello requests and session IDs
+272386472..474. The reply contained an unquoted/duplicated `native_rpc` suffix.
+Running the actual upstream Frozen formatter with session 272386472 reproduced
+exactly `{"ok":true,"v":1,"session":272386472,native_rpc:1},"native_rpc":1}`.
+Frozen copied the remaining JSON format into a temporary printf format instead
+of terminating it after the current conversion. This also allowed later printf
+conversions to read arguments belonging to Frozen-specific specifiers. The local
+Flipper copy now bounds and terminates the individual conversion before printf;
+reference sources remain untouched. Native tests compile the actual formatter
+and strictly parse hello/commands/status/job replies with ESP32's cJSON, including
+sessions above INT32_MAX and truncated output buffers. This correction requires
+a new Flipper update package; it does not require another ESP32 rebuild. Physical
+link stability remains to be checked after installation.
+
+The next capture contained one valid hello (session 2595840768), followed by
+hundreds of accepted UI/poll requests before going offline. Near the tail a
+heartbeat byte appeared before a data frame, with its matching byte after the
+frame. The capture is a lossy text export (high bytes replaced with '?'), so it
+cannot establish every checksum or electrical error. Inspection nevertheless
+found and host-reproduced a concrete TX race: the Expansion worker sends
+heartbeat/status on its thread while the RPC thread sends data, and the UART
+driver and frame encoder had no shared lock. The encoder writes the frame body
+and checksum separately. A per-worker mutex now covers both writes and remains
+allocated until the RPC/worker threads have stopped. The same forced-preemption
+test fails on unmodified reference code and passes 6000 mixed frames with the fix.
+
+ESP32 keeps the standard discovery/baud/RPC/hello sequence. Steady-state command
+polling is limited to 200 ms; unchanged UI refreshes every 2 s, with state/mouth/
+emotion changes still eligible every 50 ms. Full public module state is checked
+once a second and sent on change or every 5 s. An explicit receive pump preserves
+the independent 100 ms heartbeat when updates are quiet. Fatal receive/ACK/RPC
+errors stop transport traffic immediately, retain a credential-free disconnect
+reason in logs/web diagnostics and return to discovery instead of continuing
+with session zero. Ten-minute simulated scheduling tests verify idle limits and
+immediate changes; these are not a ten-minute hardware endurance test.
+
+Settings help now uses a bounded 124x50 scroll/wrap element below the title.
+Network status, setup credentials and identity can be read with Up/Down instead
+of clipping the fifth/sixth line or long state names. Unchanged snapshots do not
+rebuild the help widget, preserving its current scroll position.
+
+## Manual conversation controls
+
+With AI enabled, desktop short OK queues one `talk:toggle` module command;
+long OK opens the system menu, including when the RTC debug flag is enabled.
+AI-off behavior and dummy-mode shortcuts remain unchanged. The mascot hints
+now say `OK: talk` / `OK: send`. ESP32 validates start prerequisites and handles
+stop independently of start readiness; UART, GPIO0/BOOT click and HTTP use one
+scheduled main-task path. Command IDs continue to suppress repeated UART polls.
+
+The device web page puts voice control immediately after status, above network
+settings. The same primary button changes from start to send while listening;
+the start action being busy must not disable sending. It posts `/api/stop-talk`,
+then refreshes status, and does not automatically replay an uncertain request.
+Host tests cover toggle/start/stop eligibility and idle/connecting/listening
+button states. Physical recording/ASR/LLM/TTS completion remains unverified.
+
+On 31 Oct the local service was ready and later showed this device with its MCP
+tools registered. The PC WLAN had changed to 192.168.2.8; the advertised URL was
+updated from 192.168.1.210 to `ws://192.168.2.8:8000/xiaozhi/v1/`. TCP 8000 was
+reachable on the WLAN address and a LocalSubnet inbound firewall rule was added.
+This does not change a URL already saved on ESP32; device configuration must use
+the current LAN address. The user confirmed audible speaker-test output and a
+listening state, which do not by themselves prove microphone capture/recognition.
+
+## Conversation history and voice/link diagnostics
+
+The admin history tab reads an authenticated, paginated device-filtered API.
+A bounded background queue writes user/assistant dialogue and processing events
+to local SQLite WAL; the latest 10000 events survive reconnect/restart. System
+prompts, temporary examples, raw tool results/arguments and audio are excluded.
+Record text renders via DOM textContent. Reconnection creates a new session ID
+without erasing older text; failed TTS records an error independently of a model
+reply. Tests cover authentication, device filtering, paging, concurrent writes,
+retention, restart, template/credential exclusion and untrusted HTML as text.
+
+The user's voice session did reach listen:start and listen:stop in server logs.
+An EdgeTTS network failure to speech.platform.bing.com was independently reproduced
+with a bounded synthesis probe (timeout). TCP alone succeeded, so TCP reachability
+does not establish a working speech WebSocket. Windows' configured loopback proxy
+also failed a bounded speech-HTTP probe; no proxy settings were changed. EdgeTTS
+now uses bounded connection/receive timeouts and records synthesis errors. This
+network condition remains an external limitation; no successful reply playback
+is claimed and it does not establish the reason for the user's UART No link.
+
+Expansion RX buffering is now four frames and its worker uses normal priority;
+overflow explicitly fails the worker instead of silently losing a byte. ESP32
+diagnostics include reset cause, uptime, heap minimum, UART task stack headroom
+and maximum gap between receive-pump calls. One disconnect reason per ten minutes
+is retained in NVS, so power cycling does not erase all diagnostic evidence. The
+device was switched off for charging before a physical failure reason could be
+read; power integrity, real UART stability and the full audio round trip still
+require hardware verification.
+
+## Local speech synthesis
+
+Local CPU TTS now uses the pinned sherpa-onnx MeloTTS Chinese/English female
+model. The 167006755-byte archive SHA256 is recorded in models.lock.json;
+download/extraction validates checksums and paths, retains licenses, and never
+commits weights. The existing runtime is reused without a separate service/GPU.
+The model engine is cached and serializes inference; PCM is encoded into WAV
+then resampled/encoded by the existing device audio path. The admin page selects
+LocalTTS/EdgeTTS and offers an authenticated preview without mutating settings.
+Current private configuration was switched to LocalTTS, preserving API keys.
+
+In a network-disabled container the real model loaded in 2.25 seconds and
+generated 7.12 seconds of audio in 1.98 seconds. The live authenticated preview
+returned 2.86 seconds of WAV in 1.0 second, and the voice runtime reported ready.
+These are CPU measurements on this machine, not speaker playback evidence.
+TTS attempts now have the configured timeout and bounded retries; a failed turn
+queues exactly one standard tts:stop and skips remaining audio for that turn.
+Existing ESP32 handles this terminal message without a firmware change. Regression
+tests cover timeout recovery, partial files, callback continuation and tts:stop.
+
+## Audio level and native system-info correction
+
+The user reported low/noisy voice and a native system-info failure at desktop_state.
+The server log contained rpc_status=1 at that stage. Actual Flipper
+rpc_desktop_on_is_locked_request returns an Empty reply: status 0 means locked,
+status 1 means unlocked. The ESP32 adapter had incorrectly expected Desktop.Status
+tag 70 (an unsolicited subscription event), and its generic error check rejected
+the normal unlocked result. The adapter now decodes the request's legacy boolean
+semantics, including lock rechecks during saved actions. Read-only system/power
+information bypasses the unnecessary desktop admission check entirely. Native
+tests compile the actual Flipper lock handler, rather than inventing its replies.
+The model tool policy also forbids diagnosing version mismatch from generic RPC
+or desktop errors alone. This correction needs an ESP32 application update; no
+Flipper-side protocol change was made in this correction.
+
+Measured local TTS WAV examples were around -30 dBFS RMS. Generated speech now
+targets -20 dBFS RMS, limits gain to 16 dB and retains 1 dB peak headroom; near-
+silence is not amplified. The live preview measured -20.0 dBFS RMS, -6.6 dBFS peak
+and zero clipped samples. Device audio initially prebuffers four 60 ms packets
+instead of two, with queue-order tests. On the DeepFlipper board alone, speaker
+I2S now outputs identical 32-bit left/right slots, avoiding L/R-average attenuation
+and channel-strap dependence; its PCM packing is tested at signed limits, half
+volume and mute. A fixed scratch buffer replaces per-frame TX allocations. Mic
+format and pins are unchanged. Electrical noise, supply limits and the user's
+amplifier are still unmeasured; these changes are not a physical noise diagnosis.
+
+## ESP32 browser audio preview
+
+The setup page now prepares a shared 24 kHz/16-bit mono buffer for its computer
+player and the device. It supports a fixed embedded speech WAV, a fade-in/out
+440 Hz tone, and browser-decodable user files up to 30 s / 10 MB. Format/metadata
+checks precede conversion; the source level is preserved. Ordered 64 KiB binary
+POSTs use the existing session/CSRF/origin checks and a random upload ID. The
+device validates sample count, offsets, chunk length and full completion before
+playing. Total PCM is capped at 1.44 MB in PSRAM, not NVS/flash. Idle preview
+workers block on notifications; abandoned uploads expire after 15 s.
+
+Playback feeds the existing bounded AudioService PCM/output queue from a separate
+task, preserving the board codec's volume/mute and mouth-level hooks. It closes
+the idle voice channel first and waits for its main-task completion. A guarded
+preparation lease prevents a cancelled/old preview from suspending a later voice
+recording. Tests compile the real queue and preparation functions, and cover
+bounded ownership, chunk/commit validation, expiry, cancellation and stale browser
+responses. Browser QA exercised speech decoding, tone preparation, WAV selection,
+full mock upload, completion and stop; build/audio-preview-ui.png uses simulated
+device status and is not evidence of physical speaker output. ESP32 hardware
+playback remains to be verified after flashing; server/Flipper RPC is unchanged.
+
 ## Development entry points
 
 - `firmware/flipper/applications/services/deepflipper/`
@@ -319,3 +501,35 @@ real audio, radio and power behavior still require the board.
 The next hardware milestone is a UART status round trip, then real voice output,
 then a bounded NFC scan while the mascot remains on the desktop. Do not use an
 unverified reference pin map as permission to connect arbitrary existing boards.
+
+## Current expansion, context and power changes
+
+Twenty MCP tools now include the capture adapter, ranged SD reads, capacity, RTC
+and GPIO modes/levels. The capture FAP is built and checked against the firmware
+SDK, then bundled into SD resources as apps/Tools/deepflipper_tools.fap. It runs
+under the shared RPC lifecycle, confirms start separately from actual result,
+writes a per-session/job result file after releasing hardware, and is exited
+with Loader release verification. IR saves decoded or assumed-38kHz RAW signals;
+Sub-GHz captures internal-radio OOK650 RAW after RSSI crosses -75 dBm, with at most
+4096 timings. NFC reads public Type2 pages and Classic with stock cached keys;
+without suitable keys/family support it returns identification or failure rather
+than claiming full read. Hardware acquisition and replay remain unverified.
+
+RPC callbacks detach before publishing stop, so the SD app never dereferences a
+freed session or frees context still owned by a callback. Host tests compile the
+actual callback and check exit/session-close ordering. Native action tests cover
+result identity, capture cleanup, file bounds, reserved GPIO rejection and long
+input. Existing transmit/emulate paths remain bounded and report target_state
+verification separately from local completion.
+
+Conversation restoration now loads only complete user/assistant pairs from the
+same device and client identity, at most 6 turns by default, 6000 characters and
+24 hours. Admin settings allow 0–12 turns; restored text is not re-recorded. No
+raw tool calls are replayed. SQLite history remains separate from live context.
+
+Bluetooth was already disabled. PM is enabled for the S3 variant, with 80–240 MHz
+CPU scaling and no automatic light sleep. Idle direct voice returns Wi-Fi to
+modem sleep even while the WebSocket stays open. Manual ESP32 standby stops AP,
+STA and voice but keeps UART commands; desktop OK or BOOT click wakes Wi-Fi.
+The active Flipper Expansion service still blocks deep sleep. No battery/current
+measurements or headset support are claimed; S3 lacks Classic HFP/A2DP.

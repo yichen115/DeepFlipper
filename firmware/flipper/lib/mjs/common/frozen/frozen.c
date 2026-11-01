@@ -644,7 +644,13 @@ int json_vprintf(struct json_out* out, const char* fmt, va_list xap) {
                 int need_len, size = sizeof(buf);
                 char fmt2[20];
                 va_list ap_copy;
-                strlcpy(fmt2, fmt, sizeof(fmt2));
+                /* Pass only this conversion to printf, never the JSON suffix. */
+                if(n < 1 || (size_t)n + 1 >= sizeof(fmt2)) {
+                    va_end(ap);
+                    return -1;
+                }
+                memcpy(fmt2, fmt, n + 1);
+                fmt2[n + 1] = '\0';
 
                 va_copy(ap_copy, ap);
                 need_len = vsnprintf(pbuf, size, fmt2, ap_copy);

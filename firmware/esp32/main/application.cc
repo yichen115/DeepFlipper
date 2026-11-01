@@ -1039,6 +1039,8 @@ void Application::HandleStateChangedEvent() {
     switch (new_state) {
         case kDeviceStateUnknown:
         case kDeviceStateIdle:
+            if (board.UseDirectVoiceServer())
+                board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
             // Keep a just-raised network error visible. SetDeviceState(idle)
             // queues STATE_CHANGED after Alert(), and the idle handler would
             // otherwise wipe the status, emotion, and chat message.
@@ -1057,6 +1059,8 @@ void Application::HandleStateChangedEvent() {
             display->SetChatMessage("system", "");
             break;
         case kDeviceStateListening:
+            if (board.UseDirectVoiceServer())
+                board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
             display->SetStatus(Lang::Strings::LISTENING);
             display->SetEmotion("neutral");
 
@@ -1076,6 +1080,8 @@ void Application::HandleStateChangedEvent() {
             }
             break;
         case kDeviceStateSpeaking:
+            if (board.UseDirectVoiceServer())
+                board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
             display->SetStatus(Lang::Strings::SPEAKING);
 
             if (listening_mode_ != kListeningModeRealtime) {
@@ -1474,8 +1480,9 @@ void Application::ResetProtocol() {
 }
 
 void Application::ReloadVoiceConfig(std::function<void()> on_applied) {
-    if (!Board::GetInstance().UseDirectVoiceServer())
+    if (!Board::GetInstance().UseDirectVoiceServer()) {
         return;
+    }
     Schedule([this, on_applied = std::move(on_applied)]() {
         auto state = GetDeviceState();
         // Initial protocol creation belongs to the activation task. New settings
@@ -1499,21 +1506,36 @@ void Application::ReloadVoiceConfig(std::function<void()> on_applied) {
     });
 }
 
-void Application::SuspendVoiceSession() {
-    if (!Board::GetInstance().UseDirectVoiceServer())
+void Application::SuspendVoiceSession(std::function<void()> on_suspended,
+                                      std::function<bool()> should_suspend) {
+    if (!Board::GetInstance().UseDirectVoiceServer()) {
+        if (on_suspended)
+            on_suspended();
         return;
-    Schedule([this]() {
+    }
+    Schedule([this, on_suspended = std::move(on_suspended),
+              should_suspend = std::move(should_suspend)]() {
+        if (should_suspend && !should_suspend()) {
+            if (on_suspended)
+                on_suspended();
+            return;
+        }
         audio_service_.EnableVoiceProcessing(false);
         audio_service_.EnableWakeWordDetection(false);
         audio_service_.ResetDecoder();
         auto state = GetDeviceState();
         if (state == kDeviceStateStarting || state == kDeviceStateActivating ||
-            state == kDeviceStateWifiConfiguring)
+            state == kDeviceStateWifiConfiguring) {
+            if (on_suspended)
+                on_suspended();
             return;
+        }
         if (state == kDeviceStateNotifying)
             StopNotification();
         if (protocol_)
             protocol_->CloseAudioChannel();
         SetDeviceState(kDeviceStateIdle);
+        if (on_suspended)
+            on_suspended();
     });
 }

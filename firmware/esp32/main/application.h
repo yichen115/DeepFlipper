@@ -127,7 +127,7 @@ public:
      */
     void ResetProtocol();
     void ReloadVoiceConfig(std::function<void()> on_applied = {});
-    void SuspendVoiceSession();
+    void SuspendVoiceSession(std::function<void()> on_suspended = {}, std::function<bool()> should_suspend = {});
 
 private:
     Application();

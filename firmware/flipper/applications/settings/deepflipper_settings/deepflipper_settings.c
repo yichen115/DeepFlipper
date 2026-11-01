@@ -24,7 +24,8 @@ static void show_help(AssistantSettings* app, const char* title, const char* tex
     snprintf(app->last_help, sizeof(app->last_help), "%s", text);
     widget_reset(app->help);
     widget_add_string_element(app->help, 64, 1, AlignCenter, AlignTop, FontPrimary, title);
-    widget_add_string_multiline_element(app->help, 3, 14, AlignLeft, AlignTop, FontSecondary, text);
+    // Long status strings, UUIDs and setup details must wrap and remain reachable.
+    widget_add_text_scroll_element(app->help, 2, 14, 124, 50, text);
     view_dispatcher_switch_to_view(app->dispatcher, 1);
 }
 static bool send_command(AssistantSettings* app, const char* field, const char* value) {
@@ -92,6 +93,8 @@ static void select_item(void* context, uint32_t index) {
         send_command(app, "microphone", "toggle");
     } else if(index == 8) {
         send_command(app, "led_brightness", "cycle");
+    } else if(index == 10) {
+        send_command(app,"power_mode",strcmp(s.wifi,"sleeping")==0?"awake":"standby");
     }
     rebuild(app);
 }
@@ -100,7 +103,7 @@ static void rebuild(AssistantSettings* app) {
     deepflipper_snapshot(&s);
     if(!app->menu_ready) {
         static const char* const labels[] = {"AI session", "Wi-Fi", "Setup web page", "Test server",
-            "Start setup hotspot", "Volume", "Voice mute", "Microphone", "LED brightness", "Device info"};
+            "Start setup hotspot", "Volume", "Voice mute", "Microphone", "LED brightness", "Device info", "ESP32 standby"};
         for(uint32_t i = 0; i < COUNT_OF(labels); i++) submenu_add_item(app->menu, labels[i], i, select_item, app);
         app->menu_ready = true;
     }
@@ -123,6 +126,8 @@ static void rebuild(AssistantSettings* app) {
     submenu_change_item_label(app->menu, 6, label);
     snprintf(label, sizeof(label), "Microphone: %s", s.microphone ? "ON" : "OFF");
     submenu_change_item_label(app->menu, 7, label);
+    snprintf(label,sizeof(label),"ESP32 standby: %s",strcmp(s.wifi,"sleeping")==0?"ON":"OFF");
+    submenu_change_item_label(app->menu,10,label);
 }
 static void tick(void* context) {
     AssistantSettings* app = context;

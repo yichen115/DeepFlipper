@@ -29,13 +29,24 @@ public:
     bool Probing() const { return probing_ || probing_queued_; }
     bool Applying() const { return apply_pending_ > 0; }
     bool ReadyToTalk() { return !ActionError(false); }
+    bool Talk(const std::string& action = "toggle");
     bool SetupMode();
     int VisualState(bool configured, int fallback);
     void PowerSave(PowerSaveLevel level);
     void Recover();
 
 private:
-    enum class CommandType { Wifi, Hotspot, CloseHotspot, Retry, Scan, Probe, Recover };
+    enum class CommandType {
+        Wifi,
+        Hotspot,
+        CloseHotspot,
+        Retry,
+        Scan,
+        Probe,
+        Recover,
+        Sleep,
+        Wake
+    };
     struct Work {
         CommandType type;
         int64_t not_before_ms;
@@ -58,6 +69,7 @@ private:
     bool password_changed_ = false, started_ = false, ap_active_ = false;
     bool candidate_ = false, scanning_ = false;
     std::atomic<bool> probing_queued_{false};
+    std::atomic<bool> standby_{false};
     std::atomic<int> apply_pending_{0};
     PowerSaveLevel power_save_ = PowerSaveLevel::LOW_POWER;
     bool wifi_ready_ = false;

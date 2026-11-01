@@ -51,6 +51,10 @@ class VoiceRuntime:
                     continue
                 asr = config.get('ASR', {}).get(config.get('selected_module', {}).get('ASR'), {})
                 vad = config.get('VAD', {}).get(config.get('selected_module', {}).get('VAD'), {})
+                if config.get('selected_module', {}).get('TTS') == 'LocalTTS':
+                    from core.providers.tts.local_melo import TTSProvider
+                    local_config = config.get('TTS', {}).get('LocalTTS', {})
+                    await asyncio.to_thread(TTSProvider, local_config, True)
                 if asr.get('type') == 'fun_local':
                     model = Path(get_project_dir()) / asr.get('model_dir', 'models/SenseVoiceSmall') / 'model.pt'
                     if not model.is_file():

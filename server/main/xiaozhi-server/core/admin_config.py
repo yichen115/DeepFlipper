@@ -9,6 +9,7 @@ import yaml
 
 from config.config_loader import merge_local_config
 from config.deepflipper_defaults import DEFAULT_PROMPT, TOOL_POLICY, TOOLS
+from core.tts_settings import LOCAL_TTS
 
 
 class ConfigConflict(ValueError):
@@ -62,6 +63,8 @@ class AdminConfig:
             'tool_policy': TOOL_POLICY, 'tools': TOOLS,
             'tool_calling': selected.get('Intent') == 'function_call',
             'asr': selected.get('ASR', ''), 'tts': selected.get('TTS', ''),
+            'tts_provider': selected.get('TTS', 'EdgeTTS'),
+            'context_turns': config.get('context_turns',6),
             'tts_voice': config.get('TTS', {}).get('EdgeTTS', {}).get('voice', 'zh-CN-XiaoxiaoNeural'),
             'websocket': config.get('server', {}).get('websocket', ''),
         }
@@ -97,11 +100,18 @@ class AdminConfig:
         if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 16000 or '\0' in prompt:
             raise ValueError('系统提示词不能为空，最多 16000 字符')
         voice = text(payload.get('tts_voice', self.public()['tts_voice']), '音色', 128)
+        tts_provider = payload.get('tts_provider', merged.get('selected_module', {}).get('TTS', 'EdgeTTS'))
+        if tts_provider not in ('LocalTTS', 'EdgeTTS'):
+            raise ValueError('请选择本地合成或 EdgeTTS')
         provider = merged.get('selected_module', {}).get('LLM', 'DeepFlipperLLM')
         old = merged.get('LLM', {}).get(provider, {})
         if old.get('type', 'openai') != 'openai':
             provider, old = 'DeepFlipperLLM', {}
         custom.setdefault('selected_module', {})['LLM'] = provider
+        custom['selected_module']['TTS'] = tts_provider
+        if tts_provider == 'LocalTTS':
+            custom.setdefault('TTS', {})['LocalTTS'] = {
+                **LOCAL_TTS, **merged.get('TTS', {}).get('LocalTTS', {})}
         if 'tool_calling' in payload:
             if not isinstance(payload['tool_calling'], bool):
                 raise ValueError('工具调用选项应为布尔值')
@@ -110,6 +120,10 @@ class AdminConfig:
         updated_model.pop('url', None)
         custom.setdefault('LLM', {})[provider] = updated_model
         custom['prompt'] = prompt
+        context_turns=payload.get('context_turns',merged.get('context_turns',6))
+        if type(context_turns) is not int or not 0<=context_turns<=12:
+            raise ValueError('重连上下文轮数应为 0–12')
+        custom['context_turns']=context_turns
         custom.setdefault('TTS', {}).setdefault('EdgeTTS', {})['voice'] = voice
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd, temporary = tempfile.mkstemp(prefix='.admin-', suffix='.yaml', dir=self.path.parent)

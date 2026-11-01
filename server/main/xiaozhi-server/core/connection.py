@@ -31,6 +31,8 @@ from core.handle.reportHandle import report, enqueue_tool_report
 from core.providers.tts.default import DefaultTTS
 from concurrent.futures import ThreadPoolExecutor
 from core.utils.dialogue import Message, Dialogue
+from core.conversation_history import history_for, record_event, record_message
+from config.config_loader import get_project_dir
 from core.providers.asr.dto.dto import InterfaceType
 from core.handle.textHandle import handleTextMessage
 from core.providers.tools.unified_tool_handler import UnifiedToolHandler
@@ -219,6 +221,16 @@ class ConnectionHandler:
             )
 
             self.device_id = self.headers.get("device-id", None)
+            try:
+                self.conversation_history = history_for(str(get_project_dir()))
+                restored=await asyncio.to_thread(self.conversation_history.context,self.device_id,
+                    self.headers.get('client-id',''),int(self.config.get('context_turns',6)))
+                for message in restored:self.dialogue.put(Message(**message))
+                self.restored_context_messages=len(restored)
+                self.dialogue.observer = lambda message: record_message(self, message)
+                record_event(self, 'status', '设备语音连接已建立')
+            except Exception as error:
+                self.logger.bind(tag=TAG).warning('Local history unavailable: {}', type(error).__name__)
 
             # 认证通过,继续处理
             self.websocket = ws
@@ -1541,6 +1553,9 @@ class ConnectionHandler:
         self.logger.bind(tag=TAG).debug(f"清除服务端讲话状态")
 
     async def close(self, ws=None):
+        if not getattr(self, '_history_closed', False):
+            self._history_closed = True
+            record_event(self, 'status', '设备语音连接已断开（不代表 UART 状态）')
         """资源清理方法"""
         try:
             # 清理 VAD 连接资源

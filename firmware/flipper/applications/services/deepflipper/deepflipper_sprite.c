@@ -95,11 +95,12 @@ static void status_text(
         *title = "No link";
         *hint = "Check ESP32";
     } else {
+        if(strcmp(snapshot->wifi,"sleeping")==0){*title="Standby";*hint="OK: wake";return;}
         static const char* const titles[] = {
             "Offline", "Setup", "Connecting", "Ready", "Listening",
-            "Thinking", "Speaking", "NFC scan", "Error"};
+            "Thinking", "Speaking", "Working", "Error"};
         static const char* const hints[] = {
-            "AI settings", "AI settings", "Please wait", "Press TALK", "Click: send",
+            "AI settings", "AI settings", "Please wait", "OK: talk", "OK: send",
             "Please wait", "Voice reply", "Hold a card", "AI settings"};
         const uint8_t state = snapshot->state <= DeepFlipperError ? snapshot->state : DeepFlipperError;
         *title = titles[state];

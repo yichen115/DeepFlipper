@@ -61,7 +61,9 @@ for repo in ('unleashed-firmware','flipperzero-firmware','xiaozhi-esp32','xiaozh
 
 test_log=(ROOT/'build-project-tests.log').read_text(encoding='utf-8',errors='replace')
 test_count=int(re.search(r'^Ran (\d+) tests?',test_log,re.M)[1])
-assert re.search(r'^OK\s*$',test_log,re.M), 'Project tests did not pass'
+test_outcome=re.search(r'^OK(?: \(skipped=(\d+)\))?\s*$',test_log,re.M)
+assert test_outcome, 'Project tests did not pass'
+test_skipped=int(test_outcome[1] or 0)
 native_log=(ROOT/'build-native.log').read_text(encoding='utf-8',errors='replace')
 assert 'PASS: C++ RPC codec' in native_log
 assert 'PASS: native RPC streaming' in native_log
@@ -69,6 +71,18 @@ assert 'PASS: native action workflows' in native_log
 assert 'PASS: Expansion 460800 negotiation' in native_log
 assert 'PASS: device portal credentials' in native_log
 assert 'PASS: setup workflow trials' in native_log
+assert 'PASS: full unsigned 32-bit companion session IDs' in native_log
+assert 'PASS: Expansion frame interoperability' in native_log
+assert 'PASS: real Flipper Frozen JSON to ESP32 cJSON' in native_log
+assert 'PASS: real Expansion worker concurrent TX' in native_log
+assert 'PASS: companion traffic scheduling' in native_log
+assert 'PASS: desktop IsLocked semantics against actual Flipper handler' in native_log
+assert 'PASS: board I2S stereo slots' in native_log
+assert 'PASS: capture adapter lifecycle' in native_log
+assert 'PASS: actual tool adapter RPC detach' in native_log
+assert 'PASS: audio preview limits' in native_log
+assert 'PASS: actual PCM playback queue bounds' in native_log
+assert 'PASS: actual preview preparation completion' in native_log
 esp_report={'target_sdk':'release/v6.1','target_build':'not exported','hardware_validated':False}
 esp_release=ROOT/'build/release/esp32'
 esp_result=ROOT/'build/esp32-build-result.json'
@@ -98,7 +112,8 @@ if esp_result.is_file() and (esp_release/'merged-binary.bin').is_file():
         if magic==0x50AA and kind==0 and offset==app[0]:app_partition=size
     assert app_partition and app[1]<=app_partition
     app_image=(esp_release/'xiaozhi.bin').read_bytes()
-    for asset in (ROOT/'firmware/esp32/main/boards/deepflipper-s3/web').glob('deepflipper_setup.*'):
+    for asset in (ROOT/'firmware/esp32/main/boards/deepflipper-s3/web').iterdir():
+        if asset.suffix not in ('.html','.js','.css','.wav'):continue
         assert asset.read_bytes() in app_image, ('Device web asset missing/stale in firmware',asset.name)
     esp_report.update(target_build='passed via EIM',user_sdk_path=result['idf_path'],
                       python=result['python'],app_bytes=app[1],app_partition_bytes=app_partition,
@@ -111,9 +126,11 @@ report={
                'hardware_flashed':False},
     'assets':{'animations':12,'sequence_frames':frames,'unique_frames':manifest['unique_frame_count'],
               'bytes':len(raw),'per_frame_logo_preserved':True},
-    'tests':{'project_python':f'{test_count} passed','native_rpc_codec':'passed',
+    'tests':{'project_python':f'{test_count-test_skipped} passed; {test_skipped} skipped','native_rpc_codec':'passed',
              'native_actions':'passed; simulated transport, not physical hardware',
              'expansion_baud_fallback':'passed; simulated peer, not electrical validation',
+             'expansion_concurrent_tx':'passed; actual worker TX functions with host mutex/UART and 6000 mixed frames',
+             'companion_traffic':'passed; ten-minute simulated scheduling and immediate state changes',
              'device_setup_policy':'passed; configuration/identity/session host tests, no hardware validation',
              'relevant_upstream_board_tests':'9 passed',
              'broader_upstream_host_run':'140 run; 12 Windows environment errors; 19 skipped'},
@@ -127,13 +144,30 @@ if selected_board_log.is_file():
         selected_count=int(re.search(r'^Ran (\d+) tests?',selected,re.M)[1])
         report['tests']['relevant_upstream_board_tests']=f'{selected_count} passed'
 report['tests']['voice_endpoints']='passed' if 'PASS: WS/WSS voice endpoints' in native_log else 'not run'
+adapter=release/'apps/Tools/deepflipper_tools.fap'
+assert adapter.is_file() and adapter.stat().st_size>0
+assert adapter.read_bytes()==(ROOT/'firmware/flipper/build/f7-firmware-C/resources/apps/Tools/deepflipper_tools.fap').read_bytes()
+report['tests']['capture_adapter']='FAP cross-compiled and SDK imports resolved; native lifecycle tests passed; physical RF/NFC/IR unverified'
 ui_log=ROOT/'build-ui-tests.log'
 if ui_log.is_file():
     assert 'PASS: browser setup workflow' in ui_log.read_text(encoding='utf-8',errors='replace')
     report['tests']['browser_setup_workflow']='passed; draft/outcome/audio prerequisite regression tests'
+preview_log=ROOT/'build-audio-preview-ui-tests.log'
+if preview_log.is_file():
+    assert 'PASS: preview WAV/tone' in preview_log.read_text(encoding='utf-8',errors='replace')
+    report['tests']['audio_preview']='passed; PCM session/queue/preparation native tests and browser upload/cancel regressions; physical speaker unverified'
 local_smoke=ROOT/'build-local-smoke.log'
 if local_smoke.is_file() and 'PASS: local CPU server/model initialized' in local_smoke.read_text(encoding='utf-8',errors='replace'):
     report['local_backend']={'cpu_model_and_ws_auth_hello':'passed',
                              'real_provider_chat':'not tested; user API configuration required'}
+docker_log=ROOT/'build-docker-project-tests.log'
+if docker_log.is_file():
+    docker_tests=docker_log.read_text(encoding='utf-8',errors='replace')
+    assert re.search(r'^OK\s*$',docker_tests,re.M), 'Docker project tests failed'
+    report['tests']['docker_python']=f"{re.search(r'^Ran (\d+) tests?',docker_tests,re.M)[1]} passed"
+tts_smoke=ROOT/'build-local-tts-codec-smoke.log'
+if tts_smoke.is_file() and 'OFFLINE_DEVICE_CODEC_PASS' in tts_smoke.read_text(encoding='utf-8',errors='replace'):
+    report['local_tts']={'offline_real_model_wav_and_24000hz_opus':'passed with network disabled',
+                         'speaker_playback':'requires physical device verification'}
 (ROOT/'build/validation.json').write_text(json.dumps(report,indent=2)+'\n',encoding='utf-8')
 print(f'PASS: links, assets, references, Flipper package (gap {gap} bytes); ESP32 {esp_report["target_build"]}.')

@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'server/main/xiaozhi-server'))
 from core.admin_server import AdminServer
 from core.auth import AuthManager
+from core.conversation_history import history_for
 from config.config_loader import merge_local_config
 
 
@@ -64,6 +65,24 @@ class AdminTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(page.status, 200)
         self.assertIn("frame-ancestors 'none'", page.headers['Content-Security-Policy'])
 
+    async def test_history_is_admin_only_filtered_paginated_and_persistent(self):
+        self.assertEqual((await self.client.get('/api/history')).status,401)
+        await self.login()
+        history=history_for(str(self.root))
+        for i in range(105):
+            history.append('device-a','client-a','session-a','user',f'utterance-{i}')
+        history.append('device-b','client-b','session-b','error','tts_failed')
+        history.pending.join()
+        response=await self.client.get('/api/history?device=device-a')
+        self.assertEqual(response.status,200)
+        data=await response.json()
+        self.assertEqual(len(data['events']),100)
+        self.assertTrue(all(r['device']=='device-a' for r in data['events']))
+        older=await self.client.get('/api/history?device=device-a&before='+str(data['before']))
+        self.assertEqual(len((await older.json())['events']),5)
+        self.assertEqual((await self.client.get('/api/history?before=-1')).status,400)
+        history.close()
+
     async def test_settings_do_not_return_saved_provider_or_server_keys(self):
         await self.login()
         response = await self.client.get('/api/settings')
@@ -111,6 +130,43 @@ class AdminTests(unittest.IsolatedAsyncioTestCase):
         payload['clear_api_key'] = True
         self.assertEqual((await self.client.post('/api/settings', json=payload, headers=headers)).status, 200)
         self.assertFalse((await self.draft())['api_key_set'])
+
+    async def test_local_tts_selection_preserves_provider_secrets_and_can_switch_back(self):
+        headers=await self.login()
+        payload=await self.draft()
+        payload['tts_provider']='LocalTTS'
+        response=await self.client.post('/api/settings',json=payload,headers=headers)
+        self.assertEqual(response.status,200)
+        self.assertEqual((await self.draft())['tts_provider'],'LocalTTS')
+        _, config=self.server.store.read()
+        self.assertEqual(config['TTS']['LocalTTS']['type'],'local_melo')
+        self.assertEqual(config['LLM']['DeepSeekLLM']['api_key'],'secret-old')
+        payload=await self.draft();payload['tts_provider']='arbitrary-module'
+        self.assertEqual((await self.client.post('/api/settings',json=payload,headers=headers)).status,400)
+        payload=await self.draft();payload['tts_provider']='EdgeTTS'
+        self.assertEqual((await self.client.post('/api/settings',json=payload,headers=headers)).status,200)
+        self.assertEqual((await self.draft())['tts_provider'],'EdgeTTS')
+        self.assertEqual((await self.client.post('/api/tts-test',json={})).status,403)
+
+    async def test_tts_preview_is_authenticated_and_returns_audio_without_changing_settings(self):
+        from unittest.mock import patch
+        class Speech:
+            audio_file_type='wav'
+            async def text_to_speak(self,text,output_file):
+                self.assertion=(text,output_file)
+                return b'RIFF-test-audio'
+        initialized=[]
+        module=types.ModuleType('core.utils.modules_initialize')
+        module.initialize_tts=lambda config:(initialized.append(config) or Speech())
+        headers=await self.login()
+        original=(self.root/'data/.config.yaml').read_bytes()
+        with patch.dict(sys.modules,{'core.utils.modules_initialize':module}):
+            response=await self.client.post('/api/tts-test',json={'tts_provider':'LocalTTS'},headers=headers)
+        self.assertEqual(response.status,200)
+        self.assertEqual(response.content_type,'audio/wav')
+        self.assertEqual(await response.read(),b'RIFF-test-audio')
+        self.assertEqual(initialized[0]['selected_module']['TTS'],'LocalTTS')
+        self.assertEqual((self.root/'data/.config.yaml').read_bytes(),original)
 
     async def test_issued_token_is_bound_to_device_and_client_and_logout_revokes_session(self):
         headers = await self.login()

@@ -13,6 +13,7 @@ from aiohttp import web
 
 from core.admin_config import AdminConfig, ConfigConflict, configured
 from core.auth import AuthManager
+from core.conversation_history import history_for
 
 SESSION_KEY = web.RequestKey('admin_session', str) if hasattr(web, 'RequestKey') else 'admin_session'
 
@@ -120,6 +121,37 @@ class AdminServer:
     async def status(self, request):
         return web.json_response(self.runtime.status())
 
+    async def history(self, request):
+        device = request.query.get('device', '')
+        if len(device) > 80:
+            raise ValueError('设备标识过长')
+        before = int(request.query.get('before', '0'))
+        if before < 0:
+            raise ValueError('分页参数无效')
+        result = await asyncio.to_thread(history_for(str(self.root)).read, device, before)
+        return web.json_response(result)
+
+    async def test_tts(self, request):
+        from core.utils.modules_initialize import initialize_tts
+        from core.tts_settings import LOCAL_TTS
+        payload = await self.body(request)
+        selected = payload.get('tts_provider', self.store.public()['tts_provider'])
+        if selected not in ('LocalTTS', 'EdgeTTS'):
+            raise ValueError('不支持的语音合成方式')
+        _, config = self.store.read()
+        config.setdefault('selected_module', {})['TTS'] = selected
+        config.setdefault('TTS', {}).setdefault('LocalTTS', LOCAL_TTS.copy())
+        try:
+            tts = await asyncio.to_thread(initialize_tts, config)
+            audio = await asyncio.wait_for(tts.text_to_speak('你好，我是鲸鱼娘。语音测试成功。', None), 20)
+            if not audio:
+                raise ValueError('语音合成没有返回音频')
+            return web.Response(body=audio, content_type='audio/wav' if tts.audio_file_type == 'wav' else 'audio/mpeg')
+        except FileNotFoundError:
+            return web.json_response({'error': '缺少本地语音模型，请运行 python scripts/download_models.py --tts-only'}, status=409)
+        except (TimeoutError, asyncio.TimeoutError):
+            return web.json_response({'error': '语音合成超时，请检查所选服务或本机负载'}, status=504)
+
     def device_credentials(self, payload):
         device, client = payload.get('device_id', ''), payload.get('client_id', '')
         for value in (device, client):
@@ -203,6 +235,8 @@ class AdminServer:
             web.post('/api/login', self.login), web.get('/api/session', self.session),
             web.post('/api/logout', self.logout), web.get('/api/settings', self.settings),
             web.post('/api/settings', self.save), web.get('/api/status', self.status),
+            web.get('/api/history', self.history),
+            web.post('/api/tts-test', self.test_tts),
             web.post('/api/device-token', self.issue_token), web.post('/api/model-test', self.test_model),
             web.post('/api/connection-profile', self.connection_profile),
         ])

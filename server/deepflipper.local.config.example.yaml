@@ -14,7 +14,7 @@ selected_module:
   VAD: SileroVAD
   ASR: FunASR
   LLM: DeepSeekLLM
-  TTS: EdgeTTS
+  TTS: LocalTTS
   Memory: nomem
   Intent: function_call
 admin:
@@ -32,6 +32,12 @@ ASR:
   FunASR:
     language: zh
 TTS:
+  LocalTTS:
+    type: local_melo
+    model_dir: models/vits-melo-tts-zh_en
+    speaker_id: 0
+    speed: 1.0
+    num_threads: 2
   EdgeTTS:
     voice: zh-CN-XiaoxiaoNeural
 Intent:

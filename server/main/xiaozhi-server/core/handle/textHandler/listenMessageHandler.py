@@ -14,6 +14,7 @@ from core.handle.sendAudioHandle import send_stt_message, send_tts_message
 from core.handle.textMessageHandler import TextMessageHandler
 from core.handle.textMessageType import TextMessageType
 from core.utils.util import remove_punctuation_and_length
+from core.conversation_history import record_event
 from core.providers.tts.dto.dto import ContentType, TTSMessageDTO, SentenceType
 
 
@@ -33,11 +34,14 @@ class ListenTextMessageHandler(TextMessageHandler):
                 f"客户端拾音模式：{conn.client_listen_mode}"
             )
         if msg_json["state"] == "start":
+            record_event(conn, 'status', '开始录音')
             # 设备从播放模式切回录音模式,清除所有音频状态和缓冲区
             conn.reset_audio_states()
         elif msg_json["state"] == "stop":
+            record_event(conn, 'status', '收到录音发送请求，正在识别')
             # 收到stop但asr未初始化，跳过处理
             if conn.asr is None:
+                record_event(conn, 'error', '语音识别尚未初始化，未处理这次录音')
                 return
 
             conn.client_voice_stop = True
@@ -52,6 +56,8 @@ class ListenTextMessageHandler(TextMessageHandler):
 
                     if len(asr_audio_task) > 0:
                         await conn.asr.handle_voice_stop(conn, asr_audio_task)
+                else:
+                    record_event(conn, 'error', '没有收到麦克风音频，请检查麦克风接线与录音时长')
         elif msg_json["state"] == "detect":
             conn.client_have_voice = False
             conn.reset_audio_states()

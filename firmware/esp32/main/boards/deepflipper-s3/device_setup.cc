@@ -11,6 +11,8 @@
 #include <memory>
 #include "application.h"
 #include "assets/lang_config.h"
+#include "audio_preview.h"
+#include "companion_json.h"
 #include "deepflipper_bridge.h"
 #include "settings.h"
 #include "voice_hello.h"
@@ -21,6 +23,10 @@ extern const char setup_js_start[] asm("_binary_deepflipper_setup_js_start");
 extern const char setup_js_end[] asm("_binary_deepflipper_setup_js_end");
 extern const char setup_css_start[] asm("_binary_deepflipper_setup_css_start");
 extern const char setup_css_end[] asm("_binary_deepflipper_setup_css_end");
+extern const char preview_js_start[] asm("_binary_audio_preview_js_start");
+extern const char preview_js_end[] asm("_binary_audio_preview_js_end");
+extern const char preview_wav_start[] asm("_binary_audio_preview_wav_start");
+extern const char preview_wav_end[] asm("_binary_audio_preview_wav_end");
 
 using namespace dfsetup;
 namespace {
@@ -253,6 +259,8 @@ bool DeviceSetup::SetupMode() {
     return ap_active_ && !connected_;
 }
 int DeviceSetup::VisualState(bool configured, int fallback) {
+    if (standby_)
+        return 0;
     std::lock_guard<std::mutex> guard(mutex_);
     return dfsetup::VisualState(configured, DeepFlipperBridge::Get().Linked(), connected_,
                                 ap_active_, server_state_, fallback);
@@ -283,9 +291,12 @@ void DeviceSetup::RefreshPowerSave() {
 }
 const char* DeviceSetup::ActionError(bool speaker) {
     std::lock_guard<std::mutex> guard(mutex_);
+    if (standby_)
+        return "module_standby";
     auto profile = Parse(profile_);
     auto state = Application::GetInstance().GetDeviceState();
-    bool busy = probing_ || probing_queued_ || wifi_trial_.Pending() || Applying();
+    bool busy = probing_ || probing_queued_ || wifi_trial_.Pending() || Applying() ||
+                AudioPreview::Get().Busy();
     if (speaker)
         return dfsetup::SpeakerError(
             DeepFlipperBridge::Get().Linked(),
@@ -297,6 +308,26 @@ const char* DeviceSetup::ActionError(bool speaker) {
                                   Token(Text(profile.get(), "token")),
                               cJSON_IsTrue(cJSON_GetObjectItem(profile.get(), "microphone")), busy,
                               state == kDeviceStateIdle || state == kDeviceStateSpeaking);
+}
+bool DeviceSetup::Talk(const std::string& action) {
+    if (standby_)
+        return Queue(CommandType::Wake);
+    auto& app = Application::GetInstance();
+    auto decision =
+        dfsetup::DecideTalk(action, app.GetDeviceState() == kDeviceStateListening, ReadyToTalk());
+    if (decision == dfsetup::TalkAction::Reject)
+        return false;
+    // UART, GPIO button and HTTP all enter through the same main-task path.
+    app.Schedule([this, decision]() {
+        auto& app = Application::GetInstance();
+        if (decision == dfsetup::TalkAction::Stop) {
+            if (app.GetDeviceState() == kDeviceStateListening)
+                app.StopListening();
+        } else if (ReadyToTalk()) {
+            app.StartListening();
+        }
+    });
+    return true;
 }
 void DeviceSetup::VoiceState(const char* state) {
     std::lock_guard<std::mutex> guard(mutex_);
@@ -332,6 +363,18 @@ void DeviceSetup::Apply(bool reload_voice) {
     });
 }
 bool DeviceSetup::Command(const std::string& field, const std::string& value) {
+    if (field == "power_mode") {
+        AudioPreview::Get().Stop();
+        if (Probing() || Applying())
+            return false;
+        if (value == "standby")
+            return Queue(CommandType::Sleep);
+        if (value == "awake")
+            return Queue(CommandType::Wake);
+        return false;
+    }
+    if (field == "talk")
+        return Talk(value);
     if (field == "wifi_portal")
         return Queue(CommandType::Hotspot);
     if (field == "test_connection") {
@@ -390,6 +433,7 @@ std::string DeviceSetup::Status(bool include_settings) {
     auto json = Parse("{}");
     auto profile = Parse(profile_);
     auto out = json.get();
+    AudioPreview::Get().AppendStatus(out);
     cJSON_AddStringToObject(out, "device_id", device_id_.c_str());
     cJSON_AddStringToObject(out, "client_id", client_id_.c_str());
     cJSON_AddStringToObject(out, "wifi", wifi_state_.c_str());
@@ -412,10 +456,13 @@ std::string DeviceSetup::Status(bool include_settings) {
     cJSON_AddBoolToObject(out, "probing", probing_ || probing_queued_);
     cJSON_AddBoolToObject(out, "applying", Applying());
     cJSON_AddBoolToObject(out, "voice_connected", voice_open_);
+    cJSON_AddBoolToObject(out, "standby", standby_);
     cJSON_AddStringToObject(out, "server_state", server_state_.c_str());
     cJSON_AddNumberToObject(out, "server_check_age_s",
                             last_server_check_ ? (Now() - last_server_check_) / 1000 : -1);
     cJSON_AddBoolToObject(out, "flipper_connected", DeepFlipperBridge::Get().Linked());
+    cJSON_AddItemToObject(out, "uart",
+                          cJSON_Parse(DeepFlipperBridge::Get().LinkDiagnostics().c_str()));
     cJSON_AddNumberToObject(out, "revision", Number(profile.get(), "revision"));
     cJSON_AddNumberToObject(
         out, "ap_close_in_s",
@@ -440,6 +487,8 @@ std::string DeviceSetup::Status(bool include_settings) {
     return Encode(out);
 }
 void DeviceSetup::HandleEvent(esp_event_base_t base, int32_t id, void* data) {
+    if (standby_)
+        return;
     if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         auto event = static_cast<ip_event_got_ip_t*>(data);
         char ip[16];
@@ -454,6 +503,10 @@ void DeviceSetup::HandleEvent(esp_event_base_t base, int32_t id, void* data) {
         std::lock_guard<std::mutex> guard(mutex_);
         wifi_state_ = "getting_ip";
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (standby_) {
+            connected_ = associated_ = false;
+            return;
+        }
         auto event = static_cast<wifi_event_sta_disconnected_t*>(data);
         connected_ = false;
         associated_ = false;
@@ -607,6 +660,34 @@ void DeviceSetup::Run() {
     while (true) {
         Work work;
         if (xQueueReceive(queue_, &work, pdMS_TO_TICKS(100)) == pdTRUE) {
+            if (work.type == CommandType::Sleep && !standby_) {
+                AudioPreview::Get().Stop();
+                standby_ = true;
+                Application::GetInstance().SuspendVoiceSession();
+                if (ap_active_)
+                    SetAp(false);
+                esp_wifi_disconnect();
+                esp_wifi_stop();
+                {
+                    std::lock_guard<std::mutex> guard(mutex_);
+                    connected_ = associated_ = got_ip_ = disconnected_ = false;
+                    connection_deadline_ = next_retry_ = ap_close_at_ = 0;
+                    ip_.clear();
+                    wifi_state_ = "sleeping";
+                    server_state_ = "sleeping";
+                    voice_open_ = false;
+                }
+                Notify(NetworkEvent::Disconnected);
+            }
+            if ((work.type == CommandType::Wake || work.type == CommandType::Recover ||
+                 work.type == CommandType::Hotspot || work.type == CommandType::Retry) &&
+                standby_) {
+                standby_ = false;
+                esp_wifi_start();
+                ConnectStored();
+            }
+            if (standby_)
+                continue;
             const int64_t remaining = work.not_before_ms - Now();
             if (remaining > 0)
                 vTaskDelay(pdMS_TO_TICKS(remaining));
@@ -851,7 +932,7 @@ esp_err_t DeviceSetup::Http(httpd_req_t* request) {
     httpd_resp_set_hdr(request, "X-Content-Type-Options", "nosniff");
     httpd_resp_set_hdr(request, "Content-Security-Policy",
                        "default-src 'self'; script-src 'self'; style-src 'self'; connect-src "
-                       "'self'; frame-ancestors 'none'; base-uri 'none'");
+                       "'self'; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'");
     std::string path = request->uri;
     path = path.substr(0, path.find('?'));
     auto respond = [&](const std::string& value, const char* status = "200 OK") {
@@ -866,7 +947,15 @@ esp_err_t DeviceSetup::Http(httpd_req_t* request) {
         if (request->method != HTTP_GET)
             return error("not_found", "404 Not Found");
         const char *begin, *end, *type;
-        if (path == "/app.js") {
+        if (path == "/audio-preview.js") {
+            begin = preview_js_start;
+            end = preview_js_end;
+            type = "application/javascript";
+        } else if (path == "/audio-preview.wav") {
+            begin = preview_wav_start;
+            end = preview_wav_end;
+            type = "audio/wav";
+        } else if (path == "/app.js") {
             begin = setup_js_start;
             end = setup_js_end;
             type = "application/javascript";
@@ -887,9 +976,12 @@ esp_err_t DeviceSetup::Http(httpd_req_t* request) {
         auto origin = Header(request, "Origin"), host = Header(request, "Host");
         if (!origin.empty() && origin != "http://" + host)
             return error("foreign_origin", "403 Forbidden");
-        if (Header(request, "Content-Type").rfind("application/json", 0) != 0)
+        const bool raw = path == "/api/audio/chunk";
+        if (Header(request, "Content-Type")
+                .rfind(raw ? "application/octet-stream" : "application/json", 0) != 0)
             return error("json_required", "415 Unsupported Media Type");
-        if (request->content_len <= 0 || request->content_len > 8192)
+        if (request->content_len <= 0 ||
+            request->content_len > (raw ? dfpreview::kChunkBytes : 8192))
             return error("body_too_large", "413 Payload Too Large");
     }
     if (path != "/api/login") {
@@ -913,6 +1005,17 @@ esp_err_t DeviceSetup::Http(httpd_req_t* request) {
                 return ESP_FAIL;
             received += count;
         }
+    }
+    if (path == "/api/audio/chunk" && write) {
+        auto offset = Header(request, "X-PCM-Offset");
+        if (offset.empty() || offset.size() > 8 ||
+            offset.find_first_not_of("0123456789") != std::string::npos)
+            return error("invalid_audio_chunk");
+        if (!AudioPreview::Get().Chunk(Header(request, "X-Preview-ID"),
+                                       strtoul(offset.c_str(), nullptr, 10),
+                                       reinterpret_cast<const uint8_t*>(body.data()), body.size()))
+            return error("invalid_audio_chunk", "409 Conflict");
+        return respond("{\"ok\":true}");
     }
     auto input = Parse(write ? body : "{}");
     if (!cJSON_IsObject(input.get()))
@@ -946,6 +1049,7 @@ esp_err_t DeviceSetup::Http(httpd_req_t* request) {
         return respond("{\"csrf\":\"" + session_.Csrf() + "\"}");
     }
     if (path == "/api/logout" && write) {
+        AudioPreview::Get().Stop();
         std::lock_guard<std::mutex> guard(mutex_);
         session_.Close();
         httpd_resp_set_hdr(request, "Set-Cookie",
@@ -954,6 +1058,30 @@ esp_err_t DeviceSetup::Http(httpd_req_t* request) {
     }
     if (path == "/api/status" && !write)
         return respond(Status(false));
+    if (path == "/api/audio/start" && write) {
+        if (auto why = ActionError(true))
+            return error(why, "409 Conflict");
+        if (!Application::GetInstance().GetAudioService().IsPlaybackIdle())
+            return error("busy", "409 Conflict");
+        auto samples = dfcompanion::UInt32(input.get(), "samples");
+        if (dfcompanion::UInt32(input.get(), "sample_rate") != dfpreview::kRate || !samples ||
+            samples > dfpreview::kMaxSamples)
+            return error("invalid_audio_format");
+        auto id = AudioPreview::Get().Begin(samples);
+        if (id.empty())
+            return error("preview_busy_or_no_memory", "409 Conflict");
+        return respond("{\"ok\":true,\"id\":\"" + id + "\"}");
+    }
+    if (path == "/api/audio/commit" && write) {
+        if (!AudioPreview::Get().Commit(Text(input.get(), "id")))
+            return error("audio_upload_incomplete", "409 Conflict");
+        return respond("{\"ok\":true,\"state\":\"queued\"}", "202 Accepted");
+    }
+    if (path == "/api/audio/stop" && write) {
+        if (!AudioPreview::Get().Stop(Text(input.get(), "id")))
+            return error("audio_id_mismatch", "409 Conflict");
+        return respond("{\"ok\":true}");
+    }
     if (path == "/api/settings" && !write)
         return respond(Status());
     if (path == "/api/identity" && !write) {
@@ -984,6 +1112,8 @@ esp_err_t DeviceSetup::Http(httpd_req_t* request) {
                 return error(why.c_str());
             reload = Text(old.get(), "url") != Text(next.get(), "url") ||
                      Text(old.get(), "token") != Text(next.get(), "token");
+            if (reload && AudioPreview::Get().Busy())
+                return error("busy", "409 Conflict");
             SaveLocked(next.get());
             if (reload) {
                 server_state_ = "not_tested";
@@ -994,6 +1124,8 @@ esp_err_t DeviceSetup::Http(httpd_req_t* request) {
         return respond(Status());
     }
     if (path == "/api/wifi" && write) {
+        if (AudioPreview::Get().Busy())
+            return error("busy", "409 Conflict");
         std::string why;
         auto request_id = Text(input.get(), "request_id");
         if (!Plain(request_id, 64, true))
@@ -1052,6 +1184,8 @@ esp_err_t DeviceSetup::Http(httpd_req_t* request) {
         return respond("{\"ok\":true,\"login_required\":true}");
     }
     if (write) {
+        if (AudioPreview::Get().Busy() && path != "/api/stop-talk")
+            return error("busy", "409 Conflict");
         CommandType action;
         if (path == "/api/hotspot")
             action = CommandType::Hotspot;
@@ -1076,15 +1210,13 @@ esp_err_t DeviceSetup::Http(httpd_req_t* request) {
         } else if (path == "/api/talk") {
             if (auto why = ActionError(false))
                 return error(why, "409 Conflict");
-            Application::GetInstance().Schedule([this]() {
-                if (!ActionError(false))
-                    Application::GetInstance().StartListening();
-            });
+            if (!Talk("start"))
+                return error("busy", "409 Conflict");
             return respond("{\"ok\":true,\"result\":\"listening_requested\"}");
         } else if (path == "/api/stop-talk") {
             if (Application::GetInstance().GetDeviceState() != kDeviceStateListening)
                 return error("not_listening", "409 Conflict");
-            Application::GetInstance().StopListening();
+            Talk("stop");
             return respond("{\"ok\":true}");
         } else
             return error("not_found", "404 Not Found");

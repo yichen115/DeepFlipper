@@ -13,7 +13,7 @@ from core.utils.audioRateController import AudioRateController
 
 TAG = __name__
 AUDIO_FRAME_DURATION = 60  # 音频帧时长（毫秒），与 Opus 编码 60ms/帧对齐
-PRE_BUFFER_COUNT = 2  # 首段发送时不入队的帧数，避免流控延迟拉高首帧到达时间
+PRE_BUFFER_COUNT = 4  # 240 ms of initial audio to tolerate Wi-Fi jitter.
 
 
 async def sendAudioMessage(conn: "ConnectionHandler", sentenceType, audios, text, sentence_id=None):
@@ -281,6 +281,9 @@ async def _do_send_audio(conn: "ConnectionHandler", opus_packet, flow_control):
 
 async def send_tts_message(conn: "ConnectionHandler", state, text=None):
     """发送 TTS 状态消息"""
+    from core.conversation_history import record_event
+    if state in ('start', 'stop'):
+        record_event(conn, 'status', '正在生成回复／语音' if state == 'start' else '服务端语音发送结束')
     if text is None and state == "sentence_start":
         return
     message = {"type": "tts", "state": state, "session_id": conn.session_id}

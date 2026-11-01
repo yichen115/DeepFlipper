@@ -1,0 +1,9 @@
+App(
+    appid="deepflipper_tools",
+    name="DeepFlipper Tools",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="deepflipper_tools_main",
+    requires=["gui", "rpc_start", "storage"],
+    stack_size=4096,
+    fap_category="Tools",
+)

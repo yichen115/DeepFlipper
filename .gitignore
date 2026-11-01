@@ -1,6 +1,20 @@
 # Project tools, build output and release packages
 /.tools/
 /build/
+/dist/
+/output/
+/tmp/
+/releases/
+/artifacts/
+/certs/
+/secrets/
+/data/
+/server/certs/
+/server/caddy-data/
+/server/caddy-config/
+/eim-cli*.exe
+*.download
+*.part
 
 # Python environments, bytecode and test caches
 .venv/
@@ -41,12 +55,14 @@ server.env
 device-token*.txt
 admin-token*.txt
 deepflipper-connection*.json
+deepflipper-identity*.json
 
 # Flipper generated files (retain source assets, including whale_frames.bin)
 /firmware/flipper/toolchain/
 /firmware/flipper/build/
 /firmware/flipper/dist/
 /firmware/flipper/assets/compiled/
+/firmware/flipper/applications/services/deepflipper/resources/apps/
 /firmware/flipper/fbt_options_local.py
 .sconsign.dblite
 compile_commands.json
@@ -61,6 +77,9 @@ compile_commands.json
 /firmware/esp32/dependencies.lock
 /firmware/esp32/main/assets/lang_config.h
 /firmware/esp32/main/mmap_generate_*.h
+
+# Generated distributable; original images, frames and runtime .bin stay tracked.
+/assets/whale-girl/whale-girl-assets.zip
 
 # Upstream issue/support metadata; DeepFlipper can own a root .github/ separately.
 # Keep workflow sources: ESP32 build/CI selection scripts reference build.yml.

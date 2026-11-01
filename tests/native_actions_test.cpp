@@ -2,12 +2,14 @@
 #include <cassert>
 #include <algorithm>
 #include <iostream>
+extern "C" int desktop_reference_lock_status(int locked);
 
 struct Fake : dfnative::Transport {
     bool alive=true,busy=false,app=false,tx=false,locked=false,fail_load=false,fail_stop=false,reset=false;
     int64_t now=0,cancel_at=-1,lock_at=-1,ready_at=-1,start_delay=0;
     int info_frames=0;
     int key=-1;
+    std::string file_data="hello";
     std::string name;
     std::vector<uint32_t> calls;
     bool NativeCancelled() override{return cancel_at>=0 && now>=cancel_at;}
@@ -22,7 +24,7 @@ struct Fake : dfnative::Transport {
         calls.push_back(tag);now+=5;
         dfnative::Reply r;r.done=true;r.message.tag=4;
         if(!cleanup && NativeCancelled()){r.error="cancelled";return r;}
-        if(tag==66){r.message.tag=70;dfwire::UInt(r.message.payload,1,locked||(lock_at>=0&&now>=lock_at));}
+        if(tag==66){r.message.tag=4;r.status=desktop_reference_lock_status(locked||(lock_at>=0&&now>=lock_at));}
         if(tag==17){r.message.tag=18;dfwire::UInt(r.message.payload,1,busy);}
         if(tag==16){busy=true;app=start_delay==0;ready_at=now+start_delay;}
         if(tag==48&&fail_load)r.status=22;
@@ -31,6 +33,11 @@ struct Fake : dfnative::Transport {
         if(tag==47){if(fail_stop)r.status=22;else{busy=false;app=false;tx=false;}}
         if(tag==23)key=short_key;
         if(tag==63){r.message.tag=64;dfwire::UInt(r.message.payload,1,1);dfwire::String(r.message.payload,2,"Cannot parse file");}
+        if(tag==28){r.message.tag=29;dfwire::UInt(r.message.payload,1,1000000);dfwire::UInt(r.message.payload,2,500000);}
+        if(tag==9){r.message.tag=10;std::vector<uint8_t> f;dfwire::String(f,4,file_data);dfwire::Bytes(r.message.payload,1,f);if(sink)assert(sink(r.message));}
+        if(tag==53){r.message.tag=54;dfwire::UInt(r.message.payload,1,1);}
+        if(tag==55){r.message.tag=56;dfwire::UInt(r.message.payload,2,1);}
+        if(tag==35){r.message.tag=36;std::vector<uint8_t>d;dfwire::UInt(d,6,2026);dfwire::Bytes(r.message.payload,1,d);}
         if(tag==32||tag==44){
             for(int i=0;i<120;++i){
                 dfwire::Message m;m.tag=tag==32?33:45;m.more=i!=119;
@@ -126,6 +133,14 @@ int main(){
         Result r(a.Execute("native.system.info","{}"));
         assert(r.ok()&&r.flag("truncated")&&f.info_frames==240);
         assert(cJSON_GetArraySize(cJSON_GetObjectItem(r.json,"info"))>0);
+        assert(std::find(f.calls.begin(),f.calls.end(),66)==f.calls.end());
+    }
+    for(bool pin_locked:{false,true}){
+        Fake f;f.locked=pin_locked;dfnative::Actions a(f,30000);
+        Result r(a.Execute("native.app.state","{}"));
+        assert(r.ok()&&r.flag("locked")==pin_locked);
+        Result info(a.Execute("native.system.info","{}"));
+        assert(info.ok());
     }
     {
         Fake f;dfnative::Actions a(f,30000);
@@ -140,4 +155,21 @@ int main(){
         assert(r.ok()&&f.key==5&&r.text("result")=="input_delivered_not_semantic_action_verified");
     }
     std::cout<<"PASS: native action workflows, five saved kinds, startup/timeout, busy/lock/cancel, cleanup failure, bounded streaming and paged files\n";
+    std::cout<<"PASS: desktop IsLocked semantics against actual Flipper handler and read-only system info\n";
+    {
+        Fake f;dfnative::Actions a(f,30000);
+        Result r(a.Execute("native.file.read","{\"path\":\"/ext/test.txt\"}"));assert(r.ok()&&r.text("hex")=="68656C6C6F");
+        Result invalid(a.Execute("native.file.read","{\"path\":\"/ext/../int/x\"}"));assert(!invalid.ok());
+        Result gpio(a.Execute("native.gpio","{\"pin\":\"PA7\",\"action\":\"read\"}"));assert(gpio.ok());
+        Result uart(a.Execute("native.gpio","{\"pin\":\"PB6\",\"action\":\"write\",\"value\":1}"));assert(!uart.ok());
+        Result sd(a.Execute("native.storage.info","{\"path\":\"/ext\"}"));assert(sd.ok());
+        Result clock(a.Execute("native.clock","{\"action\":\"get\"}"));assert(clock.ok());
+        Result key(a.Execute("native.input","{\"key\":\"ok\",\"press_type\":\"long\"}"));assert(key.ok()&&f.key==10);
+    }
+    {
+        Fake f;f.file_data="{\"ok\":true,\"request_id\":\"123_1\",\"path\":\"/ext/infrared/captured.ir\"}";
+        dfnative::Actions a(f,30000);Result r(a.Execute("native.capture","{\"kind\":\"ir\",\"request_id\":\"123_1\",\"timeout_ms\":500}"));
+        assert(r.ok()&&r.flag("stopped")&&!f.app&&!f.busy);
+    }
+    std::cout<<"PASS: capture adapter lifecycle, bounded SD reads, clock, GPIO and long input\n";
 }

@@ -1,6 +1,7 @@
 #include "firmware/esp32/main/boards/deepflipper-s3/portal_config.h"
 #include "firmware/esp32/main/boards/deepflipper-s3/setup_flow.h"
 #include "firmware/esp32/main/protocols/voice_hello.h"
+#include "firmware/esp32/main/boards/deepflipper-s3/companion_json.h"
 #include <cassert>
 #include <iostream>
 
@@ -76,7 +77,14 @@ int main() {
     assert(std::string(TalkError(true,true,false,true,false,true))=="needs_config");
     assert(std::string(TalkError(true,true,true,false,false,true))=="microphone_disabled");
     assert(!TalkError(true,true,true,true,false,true));
+    assert(DecideTalk("toggle",false,true)==TalkAction::Start);
+    assert(DecideTalk("toggle",true,false)==TalkAction::Stop);
+    assert(DecideTalk("start",true,true)==TalkAction::Reject);
+    assert(DecideTalk("stop",false,true)==TalkAction::Reject);
+    assert(DecideTalk("toggle",false,false)==TalkAction::Reject);
+    assert(DecideTalk("unknown",false,true)==TalkAction::Reject);
     assert(VisualState(true,true,true,false,"auth_failed",3)==8);
+    assert(VisualState(true,true,true,false,"connect_timeout",3)==8);
     assert(VisualState(true,true,true,false,"connecting",3)==2);
     assert(VisualState(true,true,false,true,"wifi_offline",3)==1);
     assert(VisualState(true,true,true,false,"authenticated",4)==4);
@@ -87,6 +95,19 @@ int main() {
     }
     input=Parse(R"({"type":"hello","transport":"websocket","session_id":"session-a","audio_params":{"sample_rate":24000,"frame_duration":60}})");
     assert(voicehello::Valid(input.get()));
+    for (uint32_t session_id : {1U, 2147483647U, 2147483648U, 3000000000U, UINT32_MAX}) {
+        auto hello = Parse("{\"session\":" + std::to_string(session_id) + "}");
+        assert(dfcompanion::UInt32(hello.get(), "session") == session_id);
+        auto request = Parse("{}");
+        cJSON_AddNumberToObject(request.get(), "session", dfcompanion::UInt32(hello.get(), "session"));
+        auto roundtrip = Parse(Encode(request.get()));
+        assert(dfcompanion::UInt32(roundtrip.get(), "session") == session_id);
+    }
+    for (auto invalid : {"-1", "1.5", "4294967296", "\"3000000000\"", "null"}) {
+        input = Parse(std::string("{\"session\":") + invalid + "}");
+        assert(dfcompanion::UInt32(input.get(), "session") == 0);
+    }
     std::cout << "PASS: device portal credentials, atomic Wi-Fi confirmation, profile validation, identity binding and session/CSRF expiry\n";
     std::cout << "PASS: setup workflow trials, rollback outcomes, late IP events, audio prerequisites and authenticated hello\n";
+    std::cout << "PASS: full unsigned 32-bit companion session IDs and JSON roundtrip\n";
 }

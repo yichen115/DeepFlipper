@@ -68,11 +68,11 @@ inline std::vector<uint8_t> Request(uint32_t id, const std::string& json) {
 // Queue the complete software-key lifetime together, so transport loss cannot
 // leave a press waiting for a later user-level call. RpcGui also releases held
 // software keys when its RPC session closes.
-inline std::vector<uint8_t> ShortInput(uint32_t first_id, uint32_t key) {
+inline std::vector<uint8_t> KeyInput(uint32_t first_id, uint32_t key, bool long_press = false) {
     if (!first_id || first_id > UINT32_MAX - 2 || key >= 6)
         return {};
     std::vector<uint8_t> wire;
-    for (uint32_t type : {0U, 2U, 1U}) {
+    for (uint32_t type : {0U, long_press ? 3U : 2U, 1U}) {
         std::vector<uint8_t> payload;
         UInt(payload, 1, key);
         UInt(payload, 2, type);
@@ -80,6 +80,9 @@ inline std::vector<uint8_t> ShortInput(uint32_t first_id, uint32_t key) {
         wire.insert(wire.end(), part.begin(), part.end());
     }
     return wire;
+}
+inline std::vector<uint8_t> ShortInput(uint32_t first_id, uint32_t key) {
+    return KeyInput(first_id, key);
 }
 
 struct Field {

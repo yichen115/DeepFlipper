@@ -22,6 +22,19 @@ proper amp; RGB reference is a common-cathode LED with a separate resistor per
 color and any required current drivers. GL5050RGB01H-T is not confirmed as the
 selected part. A common-anode or addressable LED requires a matching driver.
 
+The DeepFlipper speaker output now uses standard Philips I2S, 32-bit left/right
+slots with identical mono PCM in both. This avoids attenuating the signal when
+a mono amplifier is strapped to average L/R, and supports either channel select.
+The microphone remains on its own I2S controller with the original pins/format.
+Software volume still applies to both slots and zero remains silent. After an
+update, start around 30–50% volume because local TTS speech is level-normalized.
+
+If using a MAX98357A module, use its rated supply and a common ground with the S3;
+keep BCLK/WS/DIN and ground wiring short. Its speaker connects across SPK+/SPK−,
+not from a speaker terminal to ground. A weak supply, poor ground or amplifier
+gain/SD strap can cause noise or low level even when digital PCM is correct.
+The source and host tests cannot establish the actual amplifier/rail condition.
+
 The physical power switch must cover ESP32, microphone/codec, amp and LED.
 Use power-off-high-impedance isolation on UART/other cross-domain signals to
 avoid phantom power. Do not directly parallel USB and Flipper 5 V. The software
@@ -32,3 +45,33 @@ Reserve antenna clearance, mic/speaker separation, debug/BOOT/RESET access and
 test points. Peak current, inrush, low-battery behavior, power-off leakage,
 audio noise, RF performance and Flipper compatibility require bench validation.
 No PCB, BOM, protection circuit or load rating is supplied by this reference map.
+
+## Debug console versus Flipper UART
+
+Bluetooth is already disabled in the S3 build. ESP32-S3 is BLE-only and cannot
+host normal Classic HFP/A2DP headsets. Power changes enable 80–240 MHz CPU DFS,
+restore modem sleep in idle voice state, and provide manual UART-wakeable Wi-Fi
+standby. The active Flipper Expansion worker still holds insomnia; power savings
+must be measured, and hardware module power-off is needed for baseline autonomy.
+
+The Expansion link carries binary framing/protobuf around JSON; a text terminal
+will show control characters even at the correct rate. Repeated hello replies
+with a duplicated/unquoted `native_rpc` suffix indicate the old Flipper Frozen
+formatter bug: install the current Flipper update package. GPIO17/18 traffic and
+the UART0 boot console are separate; capture the latter for `FlipperLink` logs.
+
+The Flipper link is **UART1, TX GPIO17 / RX GPIO18**. On a generic S3 development
+board, header pins marked TX/RX normally belong to the separate **UART0 console,
+GPIO43/GPIO44 at 115200**. Wire Flipper pin 13 TX to S3 IO18 RX, Flipper pin 14 RX
+to S3 IO17 TX, and share GND. GPIO numbers are not the physical header positions.
+Seeing boot/Wi-Fi text on CH340 confirms the console path; the Flipper path carries
+binary Expansion frames and is independent of that text console.
+
+For receive-only console monitoring, connect CH340 RX to S3 GPIO43 and GND to GND;
+leave CH340 TX/VCC unconnected while the module already has its own supply. Keep
+the console at 115200 even when the Flipper link negotiates 460800. Avoid putting
+two TX outputs on the same net. New firmware logs `FlipperLink` handshake stages
+and RX/error counters without credentials. `no_heartbeat` is before rate negotiation:
+check IO17/18, common ground, AI session and Expansion listener. `baud_ack_failed`
+means negotiation was not acknowledged; `rpc_start_failed`/`hello_rejected` locate
+later stages. A stable connection logs `Expansion connected at ... baud`.

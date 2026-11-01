@@ -3,6 +3,7 @@ import uuid
 import edge_tts
 from datetime import datetime
 from core.providers.tts.base import TTSProviderBase
+from core.conversation_history import record_event
 
 
 class TTSProvider(TTSProviderBase):
@@ -50,6 +51,8 @@ class TTSProvider(TTSProviderBase):
                 rate=self.edge_rate,
                 volume=self.edge_volume,
                 pitch=self.edge_pitch,
+                connect_timeout=5,
+                receive_timeout=10,
             )
             if output_file:
                 # 确保目录存在并创建空文件
@@ -70,5 +73,6 @@ class TTSProvider(TTSProviderBase):
                         audio_bytes += chunk["data"]
                 return audio_bytes
         except Exception as e:
+            record_event(self.conn, 'error', 'EdgeTTS 合成失败：' + type(e).__name__ + '；请检查服务器到微软语音服务的网络')
             error_msg = f"Edge TTS请求失败: {e}"
             raise Exception(error_msg)  # 抛出异常，让调用方捕获

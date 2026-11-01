@@ -14,7 +14,7 @@
 #define TAG "ExpansionSrv"
 
 #define EXPANSION_WORKER_STACK_SZIE  (768UL)
-#define EXPANSION_WORKER_BUFFER_SIZE (sizeof(ExpansionFrame) + sizeof(ExpansionFrameChecksum))
+#define EXPANSION_WORKER_BUFFER_SIZE (4 * (sizeof(ExpansionFrame) + sizeof(ExpansionFrameChecksum)))
 
 typedef enum {
     ExpansionWorkerStateHandShake,
@@ -42,6 +42,7 @@ struct ExpansionWorker {
     FuriThread* thread;
     FuriStreamBuffer* rx_buf;
     FuriSemaphore* tx_semaphore;
+    FuriMutex* tx_mutex;
 
     FuriHalSerialId serial_id;
     FuriHalSerialHandle* serial_handle;
@@ -70,7 +71,11 @@ static void expansion_worker_serial_rx_callback(
     } else if(event & FuriHalSerialRxEventData) {
         while(furi_hal_serial_async_rx_available(handle)) {
             const uint8_t data = furi_hal_serial_async_rx(handle);
-            furi_stream_buffer_send(instance->rx_buf, &data, sizeof(data), 0);
+            if(furi_stream_buffer_send(instance->rx_buf, &data, sizeof(data), 0) != sizeof(data)) {
+                furi_thread_flags_set(
+                    furi_thread_get_id(instance->thread), ExpansionWorkerFlagError);
+                break;
+            }
         }
         furi_thread_flags_set(furi_thread_get_id(instance->thread), ExpansionWorkerFlagData);
     }
@@ -132,8 +137,14 @@ static size_t
 
 static inline bool
     expansion_worker_send_frame(ExpansionWorker* instance, const ExpansionFrame* frame) {
-    return expansion_protocol_encode(frame, expansion_worker_send_callback, instance) ==
-           ExpansionProtocolStatusOk;
+    // RPC replies run on a different thread from heartbeat/status replies.
+    // Serialize the WHOLE frame, including its separately encoded checksum.
+    if(furi_mutex_acquire(instance->tx_mutex, FuriWaitForever) != FuriStatusOk) return false;
+    const bool success =
+        expansion_protocol_encode(frame, expansion_worker_send_callback, instance) ==
+        ExpansionProtocolStatusOk;
+    furi_mutex_release(instance->tx_mutex);
+    return success;
 }
 
 static bool expansion_worker_send_heartbeat(ExpansionWorker* instance) {
@@ -387,10 +398,11 @@ ExpansionWorker* expansion_worker_alloc(FuriHalSerialId serial_id) {
     instance->thread = furi_thread_alloc_ex(
         TAG "Worker", EXPANSION_WORKER_STACK_SZIE, expansion_worker, instance);
     instance->rx_buf = furi_stream_buffer_alloc(EXPANSION_WORKER_BUFFER_SIZE, 1);
+    instance->tx_mutex = furi_mutex_alloc(FuriMutexTypeNormal);
     instance->serial_id = serial_id;
 
-    // Improves responsiveness in heavy games at the expense of dropped frames
-    furi_thread_set_priority(instance->thread, FuriThreadPriorityLow);
+    // The assistant remains connected while foreground apps and audio are busy.
+    furi_thread_set_priority(instance->thread, FuriThreadPriorityNormal);
 
     return instance;
 }
@@ -399,6 +411,7 @@ void expansion_worker_free(ExpansionWorker* instance) {
     furi_stream_buffer_free(instance->rx_buf);
     furi_thread_join(instance->thread);
     furi_thread_free(instance->thread);
+    furi_mutex_free(instance->tx_mutex);
     free(instance);
 }
 

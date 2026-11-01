@@ -11,6 +11,8 @@
       "CONFIG_USE_AUDIO_PROCESSOR=n",
       "CONFIG_USE_DEVICE_AEC=n",
       "CONFIG_USE_SERVER_AEC=n"
+      ,"CONFIG_BT_ENABLED=n"
+      ,"CONFIG_PM_ENABLE=y"
     ]
   }]
 }

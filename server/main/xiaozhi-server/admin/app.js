@@ -1,6 +1,13 @@
 'use strict';
 const $ = id => document.getElementById(id);
 let csrf = '', revision = '', pollTimer = null, connectionProfile = null;
+let historyCursor = 0, historyNext = 0, historyLoading = false, historyGeneration = 0;
+let previewUrl = null;
+function refreshTts() {
+  const local=$('tts-provider').value==='LocalTTS';
+  $('tts-voice').disabled=local;
+  $('tts-hint').textContent=local?'使用本机 CPU 合成中文／英文，不访问微软接口。首次请运行 python scripts/download_models.py --tts-only。':'EdgeTTS 需要服务器能够连接微软语音服务；网络不可用时建议切换本地合成。';
+}
 function message(text, error = false) {
   const box = $('message'); box.textContent = text; box.className = error ? 'error' : ''; box.hidden = false;
   clearTimeout(message.timer); message.timer = setTimeout(() => { box.hidden = true; }, 6500);
@@ -21,6 +28,10 @@ async function api(path, options = {}) {
   return data;
 }
 function showLogin() {
+  if(previewUrl) URL.revokeObjectURL(previewUrl);previewUrl=null;
+  $('tts-preview').pause();$('tts-preview').removeAttribute('src');$('tts-preview').hidden=true;
+  historyGeneration++;historyCursor=historyNext=0;
+  $('history-events').replaceChildren();
   connectionProfile = null;
   $('console').hidden = true; $('login-card').hidden = false; $('runtime').textContent = '未登录';
   clearInterval(pollTimer); pollTimer = null; csrf = ''; $('device-token').value = ''; $('api-key').value = '';
@@ -31,7 +42,7 @@ function showLogin() {
 function draft() {
   return { revision, base_url: $('base-url').value.trim(), model_name: $('model-name').value.trim(),
     api_key: $('api-key').value.trim(), clear_api_key: $('clear-key').checked,
-    prompt: $('prompt').value, tts_voice: $('tts-voice').value.trim(), tool_calling: $('tool-calling').checked };
+    prompt: $('prompt').value, context_turns:Number($('context-turns').value),tts_voice: $('tts-voice').value.trim(), tts_provider:$('tts-provider').value, tool_calling: $('tool-calling').checked };
 }
 function invalidateConnection() {
   if(connectionProfile) message('设备信息已改变，旧连接配置已收起，请重新生成。');
@@ -46,6 +57,8 @@ async function loadSettings() {
   $('api-key').value = ''; $('clear-key').checked = false;
   $('tool-calling').checked = data.tool_calling;
   $('asr-name').textContent = data.asr; $('tts-name').textContent = data.tts;
+  $('tts-provider').value=data.tts_provider||data.tts||'EdgeTTS';refreshTts();
+  $('context-turns').value=data.context_turns??6;
   $('tool-policy').textContent = data.tool_policy; $('tools').replaceChildren();
   for (const item of data.tools) {
     const row = document.createElement('div'); row.className = 'tool';
@@ -73,6 +86,29 @@ async function status() {
     use.addEventListener('click', () => { $('device-id').value = item.device_id; $('client-id').value = item.client_id; invalidateConnection(); }); row.append(use);
     $('devices').append(row);
   }
+  if(!$('history-panel').hidden && !historyCursor) await loadHistory();
+}
+async function loadHistory(before=0) {
+  if(historyLoading) return;
+  historyLoading=true;
+  const generation=historyGeneration, device=$('history-device').value;
+  try {
+    const data=await api('/api/history?device='+encodeURIComponent(device)+'&before='+before);
+    if(generation!==historyGeneration || $('console').hidden) return;
+    historyCursor=before;historyNext=data.before;
+    const options=[...$('history-device').options].map(o=>o.value);
+    for(const value of data.devices) if(!options.includes(value)) {
+      const option=document.createElement('option');option.value=value;option.textContent=value||'未标识设备';$('history-device').append(option);
+    }
+    $('history-events').replaceChildren();
+    for(const event of data.events) {
+      const row=document.createElement('article');row.className='history-event '+event.kind;
+      const meta=document.createElement('small');meta.textContent=`${new Date(event.time*1000).toLocaleString()} · ${event.device} · ${{user:'你',assistant:'鲸鱼娘',status:'状态',error:'错误'}[event.kind]||event.kind}`;
+      const text=document.createElement('div');text.textContent=event.text;row.append(meta,text);$('history-events').append(row);
+    }
+    $('history-note').textContent=data.write_error?'记录写入出现异常，请检查服务端数据目录和磁盘。':data.events.length?(before?'正在查看较早记录，点击“查看最新”返回。':'显示最近记录，每 2.5 秒刷新。'):'暂无记录。开始一次对话后，这里会显示识别文字、回复和处理状态。';
+    $('history-older').disabled=!historyNext;
+  } finally {historyLoading=false;}
 }
 async function openConsole() {
   await loadSettings(); $('login-card').hidden = true; $('console').hidden = false;
@@ -93,8 +129,12 @@ $('logout').addEventListener('click', () => busy($('logout'), async () => { awai
 document.querySelectorAll('.tab').forEach(button => button.addEventListener('click', () => {
   document.querySelectorAll('.tab').forEach(tab => tab.classList.toggle('active', tab === button));
   document.querySelectorAll('.panel').forEach(panel => { panel.hidden = panel.id !== button.dataset.panel; });
-  document.querySelector('.save-bar').hidden = button.dataset.panel === 'device-panel';
+  document.querySelector('.save-bar').hidden = ['device-panel','history-panel'].includes(button.dataset.panel);
+  if(button.dataset.panel==='history-panel') loadHistory(historyCursor).catch(error=>message(error.message,true));
 }));
+$('history-device').addEventListener('change',()=>{historyGeneration++;historyCursor=0;loadHistory().catch(error=>message(error.message,true));});
+$('history-refresh').addEventListener('click',()=>busy($('history-refresh'),()=>loadHistory()));
+$('history-older').addEventListener('click',()=>busy($('history-older'),()=>loadHistory(historyNext)));
 $('save').addEventListener('click', () => busy($('save'), async () => {
   const result = await api('/api/settings', { method: 'POST', body: draft() }); revision = result.revision;
   await loadSettings(); await status(); message('已保存，语音服务正在重新应用设置。');
@@ -102,6 +142,17 @@ $('save').addEventListener('click', () => busy($('save'), async () => {
 $('test-model').addEventListener('click', () => busy($('test-model'), async () => {
   const result = await api('/api/model-test', { method: 'POST', body: draft() });
   message(result.tool_call_returned ? '模型接口与工具调用测试通过。' : '接口可达，但未返回工具调用；请确认模型支持 tools。', !result.tool_call_returned);
+}));
+$('tts-provider').addEventListener('change',refreshTts);
+$('test-tts').addEventListener('click',()=>busy($('test-tts'),async()=>{
+  message('正在生成试听音频…');
+  const response=await fetch('/api/tts-test',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({tts_provider:$('tts-provider').value})});
+  if(!response.ok){if(response.status===401)showLogin();const text=await response.text();let error;try{error=JSON.parse(text).error;}catch{error=text;}throw new Error(error||'试听失败');}
+  const audio=await response.blob();
+  if($('console').hidden)return;
+  if(previewUrl)URL.revokeObjectURL(previewUrl);
+  previewUrl=URL.createObjectURL(audio);$('tts-preview').src=previewUrl;$('tts-preview').hidden=false;
+  await $('tts-preview').play().catch(()=>{});message('试听已生成，可点击播放器播放。切换语音方式后请保存并应用。');
 }));
 $('device-form').addEventListener('submit', event => {
   event.preventDefault(); busy(event.submitter, async () => {

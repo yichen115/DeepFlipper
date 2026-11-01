@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict');
-const {DraftBook,wifiOutcome,actionState,nextStep} = require('../firmware/esp32/main/boards/deepflipper-s3/web/deepflipper_setup.js');
+const {DraftBook,wifiOutcome,actionState,nextStep,uartState,voiceControl} = require('../firmware/esp32/main/boards/deepflipper-s3/web/deepflipper_setup.js');
 const book = new DraftBook();
 assert.deepEqual(book.merge({revision:1}),['wifi','server','audio']);
 book.touch('server','token');
@@ -31,8 +31,19 @@ assert.equal(actionState({...ready,microphone:false}).talk,'microphone_disabled'
 assert.equal(actionState({...ready,mute:true}).speaker,'speaker_muted');
 assert.equal(actionState({...ready,volume:0}).speaker,'volume_zero');
 assert.equal(actionState({...ready,applying:true}).talk,'busy');
+assert.equal(actionState({...ready,audio_preview:{busy:true}}).talk,'busy');
 assert.equal(actionState({...ready,app_state:'listening'}).speaker,'busy');
 assert.equal(nextStep({...ready,config_ready:false}),'导入或保存服务器连接配置');
 assert.equal(nextStep({...ready,server_state:'auth_failed'}),'在服务端重新签发并导入 Token');
 assert.equal(nextStep({...ready,wifi_pending:true}),'等待新 Wi-Fi 验证，原配置保留');
 console.log('PASS: browser setup workflow preserves drafts, tracks request outcomes and gates audio actions');
+assert.equal(uartState({flipper_connected:true,uart:{last_disconnect:'frame_checksum'}}),'已连接');
+assert.match(uartState({uart:{stage:'discovery',last_disconnect:'frame_checksum'}}),/等待设备发现.*帧校验失败/);
+assert(!uartState({uart:{stage:'no_heartbeat',last_disconnect:'none'}}).includes('上次中断'));
+assert.deepEqual(voiceControl(ready),{path:'talk',label:'开始录音',disabled:false});
+assert.equal(voiceControl({...ready,app_state:'connecting'}).disabled,true);
+const recording={...ready,app_state:'listening'};
+assert.equal(actionState(recording).talk,'busy');
+assert.deepEqual(voiceControl(recording),{path:'stop-talk',label:'发送这段录音',disabled:false});
+assert.equal(voiceControl({...recording,microphone:false,probing:true}).path,'stop-talk');
+assert.equal(voiceControl({...ready,wifi:'failed'}).disabled,true);

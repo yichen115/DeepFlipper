@@ -17,7 +17,7 @@
 - `animated_characters.gif`、`animated_overview.gif`、`expressions.png`：角色和横屏状态总览。
 - `conversation_demo.gif`、`conversation_native_128x64.gif`：顺序交互演示，前者放大、后者原生黑白。
 - 每组另有`<state>_native.gif`与`<state>_screen.gif`。
-- `whale-girl-assets.zip`：当前素材包，含源图、序列帧、预览和说明；生成脚本在项目的`scripts/`中。
+- `whale-girl-assets.zip`：本地生成的分发包，不再提交到源码仓库；源图、序列帧和预览仍保留在本目录，生成脚本位于项目的 `scripts/` 中。
 
 12组：idle待机、listening倾听、thinking思考、speaking说话、happy开心、shy害羞、surprised惊讶、wave挥手、sad难过、angry生气、sleeping困倦、nod点头。
 

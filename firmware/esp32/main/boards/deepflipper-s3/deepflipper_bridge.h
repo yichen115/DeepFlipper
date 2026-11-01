@@ -29,6 +29,7 @@ public:
     void RestoreSettings();
     void RefreshSettings();
     void VolumeChanged(int volume);
+    std::string LinkDiagnostics();
 
 private:
     struct JobEntry {
@@ -70,9 +71,21 @@ private:
     TaskHandle_t task_ = nullptr;
     bool status_received_ = false, status_ok_ = false;
     bool discovery_received_ = false;
+    std::atomic<dfexpansion::LinkStage> link_stage_{dfexpansion::LinkStage::Starting};
+    std::atomic<uint32_t> uart_attempts_{0}, uart_rx_bytes_{0}, uart_frame_errors_{0};
+    std::atomic<uint32_t> requested_baud_{dfexpansion::kPreferredBaud};
+    std::atomic<int> last_status_error_{-1};
+    dfexpansion::LinkStage last_logged_failure_ = dfexpansion::LinkStage::Starting;
+    int64_t last_link_log_ms_ = 0;
     dfexpansion::LinkRate link_rate_;
     bool started_ = false;
     bool rpc_transport_active_ = false;
+    bool transport_failed_ = false;
+    std::atomic<const char*> last_disconnect_{"none"};
+    std::atomic<uint32_t> disconnects_{0};
+    std::atomic<uint32_t> max_pump_gap_ms_{0}, stack_free_bytes_{0};
+    int64_t last_pump_us_ = 0;
+    std::string previous_disconnect_;
     int64_t last_heartbeat_us_ = 0;
     int64_t last_led_refresh_us_ = 0;
     std::atomic<int> brightness_{12};
@@ -81,6 +94,7 @@ private:
     bool ReadFrame(int timeout_ms);
     void Dispatch(const std::vector<uint8_t>& frame);
     bool WaitStatus(int timeout_ms);
+    void FailLink(const char* reason);
     bool Connect();
     std::string Call(const std::string& request);
     bool SendWire(const std::vector<uint8_t>& wire);
@@ -91,16 +105,13 @@ private:
     bool Alive() const override { return session_ != 0; }
     int64_t NowMs() const override;
     void Pump() override;
-    void Reset() override {
-        session_ = 0;
-        rpc_transport_active_ = false;
-    }
+    void Reset() override { FailLink("native_state_unconfirmed"); }
     bool AppRunning() const override { return rpc_app_running_; }
     std::string AppName() const override { return rpc_app_name_; }
     void SetAppName(const std::string& name) override { rpc_app_name_ = name; }
     std::string ExecuteNative(const JobEntry& job);
     void Run();
     void ApplyCommand(const std::string& command);
-    std::string PublicResult(int id, bool success);
+    std::string PublicResult(uint32_t id, bool success);
     void UpdateLed();
 };

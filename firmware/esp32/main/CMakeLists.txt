@@ -96,6 +96,8 @@ if(CONFIG_BOARD_TYPE_DEEPFLIPPER_S3)
     set(DEEPFLIPPER_WEB_FILES
         "boards/deepflipper-s3/web/deepflipper_setup.html"
         "boards/deepflipper-s3/web/deepflipper_setup.js"
+        "boards/deepflipper-s3/web/audio_preview.js"
+        "boards/deepflipper-s3/web/audio-preview.wav"
         "boards/deepflipper-s3/web/deepflipper_setup.css")
 elseif(CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI)
     set(BOARD_DIR "bread-compact-wifi")

@@ -152,7 +152,8 @@ static int32_t worker(void* context) {
             unlock();
             power_tick = furi_get_tick();
         }
-        furi_delay_ms(20);
+        // Mascot frames run at 120 ms. Only an active NFC worker needs fast polling.
+        furi_delay_ms(scanner ? 20 : 120);
     }
     return 0;
 }

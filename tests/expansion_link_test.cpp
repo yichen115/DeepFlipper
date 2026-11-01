@@ -2,6 +2,10 @@
 #include <cassert>
 #include <iostream>
 #include <vector>
+#include <algorithm>
+#include <cstring>
+extern "C" int expansion_reference_roundtrip(const uint8_t*, size_t, uint8_t*, size_t*, uint8_t*, uint32_t*, uint8_t*);
+
 
 using dfexpansion::ConnectResult;
 
@@ -18,6 +22,23 @@ struct Peer {
 };
 
 int main() {
+    assert(dfexpansion::kPresenceByte == 0xAA);
+    for (uint8_t type : {uint8_t(1), uint8_t(2), uint8_t(3), uint8_t(4), uint8_t(5)}) {
+        std::vector<uint8_t> payload;
+        if (type == 2 || type == 4) payload = {0};
+        if (type == 3) { auto bytes=dfexpansion::BaudPayload(460800); payload.assign(bytes.begin(),bytes.end()); }
+        if (type == 5) payload = std::vector<uint8_t>(64, 0x5a);
+        auto input=dfexpansion::EncodeFrame(type,payload.data(),payload.size());
+        uint8_t output[128], decoded=0, data_size=0;
+        uint32_t baud=0; size_t output_size=sizeof(output);
+        assert(expansion_reference_roundtrip(input.data(),input.size(),output,&output_size,&decoded,&baud,&data_size)==0);
+        assert(decoded==type);
+        if(type==3) assert(baud==460800);
+        if(type==5) assert(data_size==64);
+        assert(std::vector<uint8_t>(output,output+output_size)==input);
+        input.back()^=1;output_size=sizeof(output);
+        assert(expansion_reference_roundtrip(input.data(),input.size(),output,&output_size,&decoded,&baud,&data_size)==2);
+    }
     assert((dfexpansion::BaudPayload(460800) == std::array<uint8_t, 4>{0x00, 0x08, 0x07, 0x00}));
     assert((dfexpansion::BaudPayload(115200) == std::array<uint8_t, 4>{0x00, 0xc2, 0x01, 0x00}));
     {
@@ -61,4 +82,5 @@ int main() {
         assert(rebooted.Connect(peer) && peer.attempts.back() == 460800);
     }
     std::cout << "PASS: Expansion 460800 negotiation bytes, discovery, fallback and reconnect policy\n";
+    std::cout << "PASS: Expansion frame interoperability against Flipper upstream encoder/decoder\n";
 }

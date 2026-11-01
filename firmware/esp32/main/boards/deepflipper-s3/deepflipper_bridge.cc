@@ -1,6 +1,7 @@
 #include "deepflipper_bridge.h"
 #include <driver/ledc.h>
 #include <esp_log.h>
+#include <esp_system.h>
 #include <esp_timer.h>
 #include <algorithm>
 #include <cmath>
@@ -10,6 +11,8 @@
 #include "application.h"
 #include "audio_codec.h"
 #include "board.h"
+#include "companion_json.h"
+#include "companion_updates.h"
 #include "config.h"
 #include "device_setup.h"
 #include "native_policy.h"
@@ -66,6 +69,11 @@ void DeepFlipperBridge::Start() {
     if (started_)
         return;
     started_ = true;
+    {
+        Settings diagnostic("df_diag");
+        previous_disconnect_ = diagnostic.GetString("disconnect");
+    }
+    ESP_LOGI(kLogTag, "Boot reset_reason=%d; UART1 TX=17 RX=18", int(esp_reset_reason()));
     uart_config_t uart{};
     uart.baud_rate = dfexpansion::kDiscoveryBaud;
     uart.data_bits = UART_DATA_8_BITS;
@@ -98,44 +106,62 @@ void DeepFlipperBridge::Start() {
 }
 
 bool DeepFlipperBridge::Frame(uint8_t type, const uint8_t* data, size_t size) {
-    std::vector<uint8_t> frame{type};
-    if (type == 5)
-        frame.push_back(size);
-    if (size)
-        frame.insert(frame.end(), data, data + size);
-    uint8_t checksum = 0;
-    for (auto byte : frame)
-        checksum ^= byte;
-    frame.push_back(checksum);
-    return uart_write_bytes(kUart, frame.data(), frame.size()) == static_cast<int>(frame.size());
+    auto frame = dfexpansion::EncodeFrame(type, data, size);
+    return !frame.empty() &&
+           uart_write_bytes(kUart, frame.data(), frame.size()) == static_cast<int>(frame.size());
+}
+
+void DeepFlipperBridge::FailLink(const char* reason) {
+    if (!transport_failed_) {
+        ++disconnects_;
+        last_disconnect_ = reason;
+        ESP_LOGW(kLogTag, "UART disconnected: reason=%s baud=%lu rx_bytes=%lu frame_errors=%lu",
+                 reason, (unsigned long)requested_baud_.load(),
+                 (unsigned long)uart_rx_bytes_.load(), (unsigned long)uart_frame_errors_.load());
+    }
+    transport_failed_ = true;
+    rpc_transport_active_ = false;
+    session_ = 0;
+    link_stage_ = dfexpansion::LinkStage::LinkLost;
 }
 
 bool DeepFlipperBridge::ReadFrame(int timeout_ms) {
+    if (transport_failed_)
+        return false;
+    int64_t pump_now = esp_timer_get_time();
+    if (rpc_transport_active_ && last_pump_us_)
+        max_pump_gap_ms_ =
+            std::max(max_pump_gap_ms_.load(), uint32_t((pump_now - last_pump_us_) / 1000));
+    last_pump_us_ = pump_now;
+    stack_free_bytes_ = uxTaskGetStackHighWaterMark(nullptr);
     int64_t deadline = esp_timer_get_time() + timeout_ms * 1000LL;
     do {
         if (rpc_transport_active_ && esp_timer_get_time() - last_heartbeat_us_ >= 100000) {
             last_heartbeat_us_ = esp_timer_get_time();
             if (!Frame(1, nullptr, 0)) {
-                session_ = 0;
+                FailLink("heartbeat_write_failed");
                 return false;
             }
         }
         uint8_t byte;
         if (uart_read_bytes(kUart, &byte, 1, pdMS_TO_TICKS(5)) != 1)
             continue;
+        ++uart_rx_bytes_;
         rx_frame_.push_back(byte);
         uint8_t type = rx_frame_[0];
         if (type == 5 && rx_frame_.size() >= 2 && rx_frame_[1] > 64) {
+            ++uart_frame_errors_;
             rx_frame_.clear();
-            session_ = 0;
+            FailLink("frame_length");
             return false;
         }
         size_t expected = type == 1 ? 2 : type == 2 || type == 4 ? 3 : type == 3 ? 6 : 0;
         if (type == 5 && rx_frame_.size() >= 2)
             expected = rx_frame_[1] <= 64 ? rx_frame_[1] + 3 : 0;
         if ((!expected && type != 5) || rx_frame_.size() > 70) {
+            ++uart_frame_errors_;
             rx_frame_.clear();
-            session_ = 0;
+            FailLink("frame_type");
             return false;
         }
         if (expected && rx_frame_.size() == expected) {
@@ -143,8 +169,9 @@ bool DeepFlipperBridge::ReadFrame(int timeout_ms) {
             for (auto b : rx_frame_)
                 sum ^= b;
             if (sum) {
+                ++uart_frame_errors_;
                 rx_frame_.clear();
-                session_ = 0;
+                FailLink("frame_checksum");
                 return false;
             }
             auto frame = std::move(rx_frame_);
@@ -162,6 +189,7 @@ void DeepFlipperBridge::Dispatch(const std::vector<uint8_t>& f) {
     if (f[0] == 2) {
         status_received_ = true;
         status_ok_ = f[1] == 0;
+        last_status_error_ = f[1];
     }
     if (f[0] != 5)
         return;
@@ -170,8 +198,7 @@ void DeepFlipperBridge::Dispatch(const std::vector<uint8_t>& f) {
     rpc_stream_.insert(rpc_stream_.end(), f.begin() + 2, f.end() - 1);
     if (rpc_stream_.size() > dfwire::kMaxMessage + 128) {
         rpc_stream_.clear();
-        session_ = 0;
-        rpc_transport_active_ = false;
+        FailLink("rpc_stream_overflow");
         return;
     }
     while (!rpc_stream_.empty()) {
@@ -181,8 +208,7 @@ void DeepFlipperBridge::Dispatch(const std::vector<uint8_t>& f) {
             break;
         if (next == dfwire::NextResult::Invalid) {
             rpc_stream_.clear();
-            session_ = 0;
-            rpc_transport_active_ = false;
+            FailLink("rpc_decode");
             return;
         }
         if (message.tag == 501) {
@@ -210,8 +236,7 @@ void DeepFlipperBridge::Dispatch(const std::vector<uint8_t>& f) {
             if (++native_reply_.frames > 2048 || (native_sink_ && !native_sink_(message))) {
                 native_reply_.error = "response_too_large_or_invalid";
                 native_reply_.done = true;
-                session_ = 0;
-                rpc_transport_active_ = false;
+                FailLink("native_response_invalid");
             } else {
                 if (message.status)
                     native_reply_.status = message.status;
@@ -225,15 +250,18 @@ void DeepFlipperBridge::Dispatch(const std::vector<uint8_t>& f) {
 
 bool DeepFlipperBridge::WaitStatus(int timeout_ms) {
     int64_t deadline = esp_timer_get_time() + timeout_ms * 1000LL;
-    while (!status_received_ && esp_timer_get_time() < deadline)
+    while (!status_received_ && !transport_failed_ && esp_timer_get_time() < deadline)
         ReadFrame(10);
-    return status_received_ && status_ok_;
+    return !transport_failed_ && status_received_ && status_ok_;
 }
 
 bool DeepFlipperBridge::Connect() {
+    ++uart_attempts_;
     session_ = 0;
     rpc_id_ = 0;
     rpc_transport_active_ = false;
+    transport_failed_ = false;
+    last_pump_us_ = 0;
     native_supported_ = false;
     native_id_ = 0;
     native_sink_ = {};
@@ -245,6 +273,9 @@ bool DeepFlipperBridge::Connect() {
         vTaskDelay(pdMS_TO_TICKS(500));
     const bool connected = link_rate_.Connect([this](uint32_t baud_rate) {
         using dfexpansion::ConnectResult;
+        requested_baud_ = baud_rate;
+        link_stage_ = dfexpansion::LinkStage::Discovery;
+        last_status_error_ = -1;
         rpc_stream_.clear();
         rx_frame_.clear();
         discovery_received_ = false;
@@ -253,40 +284,69 @@ bool DeepFlipperBridge::Connect() {
             uart_set_baudrate(kUart, dfexpansion::kDiscoveryBaud) != ESP_OK)
             return ConnectResult::Failed;
         uart_flush_input(kUart);
-        gpio_reset_pin(DF_UART_TX);
-        gpio_set_direction(DF_UART_TX, GPIO_MODE_OUTPUT);
-        gpio_set_level(DF_UART_TX, 0);
-        vTaskDelay(pdMS_TO_TICKS(10));
-        uart_set_pin(kUart, DF_UART_TX, DF_UART_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+        // A 10 ms GPIO-low break can outlive the peer's UART startup and
+        // trigger its frame-error exit. Keep the UART routed and send the
+        // upstream expansion_test presence byte (about 1 ms at 9600/8N1).
+        const uint8_t presence = dfexpansion::kPresenceByte;
+        if (uart_write_bytes(kUart, &presence, 1) != 1 ||
+            uart_wait_tx_done(kUart, pdMS_TO_TICKS(50)) != ESP_OK) {
+            link_stage_ = dfexpansion::LinkStage::PresenceWriteFailed;
+            return ConnectResult::Failed;
+        }
         const int64_t discovery_deadline = esp_timer_get_time() + 180000;
-        while (!discovery_received_ && esp_timer_get_time() < discovery_deadline)
+        while (!discovery_received_ && !transport_failed_ &&
+               esp_timer_get_time() < discovery_deadline)
             ReadFrame(10);
-        if (!discovery_received_)
+        if (!discovery_received_) {
+            link_stage_ = dfexpansion::LinkStage::NoHeartbeat;
             return ConnectResult::NoPeer;
+        }
+        link_stage_ = dfexpansion::LinkStage::BaudAck;
         auto baud = dfexpansion::BaudPayload(baud_rate);
         status_received_ = false;
-        if (!Frame(3, baud.data(), baud.size()) || !WaitStatus(150))
+        if (!Frame(3, baud.data(), baud.size()) || !WaitStatus(150)) {
+            link_stage_ = dfexpansion::LinkStage::BaudAckFailed;
             return ConnectResult::Failed;
+        }
         // The ACK arrives at 9600. Switch only after receiving it and draining TX.
         if (uart_wait_tx_done(kUart, pdMS_TO_TICKS(50)) != ESP_OK ||
             uart_set_baudrate(kUart, baud_rate) != ESP_OK)
             return ConnectResult::Failed;
         vTaskDelay(pdMS_TO_TICKS(30));
+        link_stage_ = dfexpansion::LinkStage::RpcStart;
         uint8_t start = 0;
         status_received_ = false;
-        if (!Frame(4, &start, 1) || !WaitStatus(150))
+        if (!Frame(4, &start, 1) || !WaitStatus(150)) {
+            link_stage_ = dfexpansion::LinkStage::RpcStartFailed;
             return ConnectResult::Failed;
+        }
         rpc_transport_active_ = true;
         last_heartbeat_us_ = esp_timer_get_time();
+        link_stage_ = dfexpansion::LinkStage::Hello;
         auto text = Call("{\"op\":\"hello\"}");
         auto result = cJSON_Parse(text.c_str());
-        session_ = Integer(result, "session");
+        session_ = dfcompanion::UInt32(result, "session");
         native_supported_ = Integer(result, "native_rpc") == 1;
         cJSON_Delete(result);
+        link_stage_ =
+            session_ ? dfexpansion::LinkStage::Online : dfexpansion::LinkStage::HelloRejected;
         return session_ ? ConnectResult::Ready : ConnectResult::Failed;
     });
     if (!connected) {
-        Reset();
+        auto stage = link_stage_.load();
+        if (stage != last_logged_failure_ ||
+            esp_timer_get_time() / 1000 - last_link_log_ms_ >= 10000) {
+            last_logged_failure_ = stage;
+            last_link_log_ms_ = esp_timer_get_time() / 1000;
+            ESP_LOGW(kLogTag,
+                     "UART connect failed: stage=%s baud=%lu rx_bytes=%lu frame_errors=%lu "
+                     "status=%d; TX=GPIO17->F14 RX=GPIO18<-F13 GND=common",
+                     dfexpansion::StageName(stage), (unsigned long)requested_baud_.load(),
+                     (unsigned long)uart_rx_bytes_.load(), (unsigned long)uart_frame_errors_.load(),
+                     last_status_error_.load());
+        }
+        session_ = 0;
+        rpc_transport_active_ = false;
         native_supported_ = false;
     } else {
         ESP_LOGI(kLogTag, "Expansion connected at %lu baud%s", (unsigned long)link_rate_.Baud(),
@@ -296,6 +356,8 @@ bool DeepFlipperBridge::Connect() {
 }
 
 std::string DeepFlipperBridge::Call(const std::string& request) {
+    if (transport_failed_ || !rpc_transport_active_)
+        return "{\"ok\":false,\"code\":\"link_lost\"}";
     auto object = cJSON_Parse(request.c_str());
     if (!cJSON_IsObject(object)) {
         cJSON_Delete(object);
@@ -312,19 +374,19 @@ std::string DeepFlipperBridge::Call(const std::string& request) {
     if (wire.empty())
         return "{\"ok\":false,\"code\":\"too_large\"}";
     if (!SendWire(wire)) {
-        session_ = 0;
+        FailLink("data_ack_timeout_or_rejected");
         return "{\"ok\":false,\"code\":\"link_lost\"}";
     }
     int64_t deadline = esp_timer_get_time() + 500000;
-    while (response_id_ != id && esp_timer_get_time() < deadline)
+    while (response_id_ != id && !transport_failed_ && esp_timer_get_time() < deadline)
         ReadFrame(10);
     if (response_id_ != id) {
-        session_ = 0;
+        FailLink("rpc_response_timeout");
         return "{\"ok\":false,\"code\":\"link_lost\"}";
     }
     auto parsed = cJSON_Parse(response_.c_str());
     if (String(parsed, "code") == "invalid_session")
-        session_ = 0;
+        FailLink("invalid_session");
     cJSON_Delete(parsed);
     return response_;
 }
@@ -359,7 +421,7 @@ DeepFlipperBridge::NativeReply DeepFlipperBridge::Native(
         bool accepted = cJSON_IsTrue(cJSON_GetObjectItem(heartbeat, "ok"));
         cJSON_Delete(heartbeat);
         if (!accepted)
-            session_ = 0;
+            FailLink("native_status_rejected");
     }
     if (!session_) {
         native_reply_.error = "link_lost";
@@ -374,7 +436,7 @@ DeepFlipperBridge::NativeReply DeepFlipperBridge::Native(
         return native_reply_;
     }
     native_id_ = native_first_id_ = ++rpc_id_;
-    auto wire = short_key >= 0 ? dfwire::ShortInput(native_first_id_, short_key)
+    auto wire = short_key >= 0 ? dfwire::KeyInput(native_first_id_, short_key % 6, short_key >= 6)
                                : dfwire::NativeRequest(native_id_, tag, payload);
     if (short_key >= 0) {
         native_id_ += 2;
@@ -383,8 +445,7 @@ DeepFlipperBridge::NativeReply DeepFlipperBridge::Native(
     native_sink_ = std::move(sink);
     if (!SendWire(wire)) {
         native_reply_.error = "link_lost";
-        session_ = 0;
-        rpc_transport_active_ = false;
+        FailLink("native_ack_timeout");
     } else {
         const int64_t deadline = esp_timer_get_time() + (cleanup ? 2000000 : 5000000);
         while (!native_reply_.done && session_ && esp_timer_get_time() < deadline) {
@@ -392,8 +453,7 @@ DeepFlipperBridge::NativeReply DeepFlipperBridge::Native(
                 (NativeCancelled() || esp_timer_get_time() / 1000 >= native_deadline_ms_)) {
                 native_reply_.error = NativeCancelled() ? "cancelled" : "timeout_unknown_result";
                 // Do not overlap an unconfirmed app command with another command.
-                session_ = 0;
-                rpc_transport_active_ = false;
+                FailLink("native_cancel_or_deadline");
                 break;
             }
             ReadFrame(10);
@@ -401,8 +461,7 @@ DeepFlipperBridge::NativeReply DeepFlipperBridge::Native(
         }
         if (!native_reply_.done && native_reply_.error.empty()) {
             native_reply_.error = "timeout_unknown_result";
-            session_ = 0;
-            rpc_transport_active_ = false;
+            FailLink("native_response_timeout");
         }
     }
     native_id_ = 0;
@@ -412,6 +471,18 @@ DeepFlipperBridge::NativeReply DeepFlipperBridge::Native(
 
 std::string DeepFlipperBridge::ExecuteNative(const JobEntry& job) {
     dfnative::Actions actions(*this, job.deadline_ms);
+    if (job.op == "native.capture") {
+        auto args = cJSON_Parse(job.args.c_str());
+        if (!cJSON_IsObject(args)) {
+            cJSON_Delete(args);
+            return "{\"ok\":false,\"code\":\"invalid_args\"}";
+        }
+        cJSON_AddStringToObject(args, "request_id",
+                                (std::to_string(session_) + "_" + std::to_string(job.id)).c_str());
+        auto text = Serialize(args);
+        cJSON_Delete(args);
+        return actions.Execute(job.op, text);
+    }
     return actions.Execute(job.op, job.args);
 }
 
@@ -568,7 +639,7 @@ bool DeepFlipperBridge::Cancel(int id) {
 
 void DeepFlipperBridge::ApplyCommand(const std::string& command) {
     auto object = cJSON_Parse(command.c_str());
-    int id = Integer(object, "id");
+    uint32_t id = dfcompanion::UInt32(object, "id");
     auto field = String(object, "field"), value = String(object, "value");
     cJSON_Delete(object);
     if (!id || static_cast<uint32_t>(id) == command_id_)
@@ -581,7 +652,7 @@ void DeepFlipperBridge::ApplyCommand(const std::string& command) {
     module_result_ = std::move(result);
 }
 
-std::string DeepFlipperBridge::PublicResult(int id, bool success) {
+std::string DeepFlipperBridge::PublicResult(uint32_t id, bool success) {
     auto p = Profile();
     auto result = cJSON_CreateObject();
     cJSON_AddStringToObject(result, "op", "module.result");
@@ -599,6 +670,31 @@ std::string DeepFlipperBridge::PublicResult(int id, bool success) {
     auto text = Serialize(result);
     cJSON_Delete(result);
     return text;
+}
+
+std::string DeepFlipperBridge::LinkDiagnostics() {
+    auto json = cJSON_CreateObject();
+    cJSON_AddBoolToObject(json, "connected", linked_);
+    cJSON_AddStringToObject(json, "stage", dfexpansion::StageName(link_stage_));
+    cJSON_AddNumberToObject(json, "attempts", uart_attempts_);
+    cJSON_AddNumberToObject(json, "rx_bytes", uart_rx_bytes_);
+    cJSON_AddNumberToObject(json, "frame_errors", uart_frame_errors_);
+    cJSON_AddNumberToObject(json, "disconnects", disconnects_);
+    cJSON_AddStringToObject(json, "last_disconnect", last_disconnect_.load());
+    cJSON_AddStringToObject(json, "previous_disconnect", previous_disconnect_.c_str());
+    cJSON_AddNumberToObject(json, "reset_reason", int(esp_reset_reason()));
+    cJSON_AddNumberToObject(json, "uptime_s", esp_timer_get_time() / 1000000);
+    cJSON_AddNumberToObject(json, "free_heap", esp_get_free_heap_size());
+    cJSON_AddNumberToObject(json, "min_free_heap", esp_get_minimum_free_heap_size());
+    cJSON_AddNumberToObject(json, "uart_stack_free", stack_free_bytes_);
+    cJSON_AddNumberToObject(json, "max_pump_gap_ms", max_pump_gap_ms_);
+    cJSON_AddNumberToObject(json, "requested_baud", requested_baud_);
+    cJSON_AddNumberToObject(json, "status", last_status_error_);
+    cJSON_AddNumberToObject(json, "esp_tx_gpio", DF_UART_TX);
+    cJSON_AddNumberToObject(json, "esp_rx_gpio", DF_UART_RX);
+    auto result = Serialize(json);
+    cJSON_Delete(json);
+    return result;
 }
 
 void DeepFlipperBridge::UpdateLed() {
@@ -667,10 +763,21 @@ void DeepFlipperBridge::UpdateLed() {
 
 void DeepFlipperBridge::Run() {
     int64_t last_report = 0;
+    int64_t last_diagnostic_save = -600000;
+    dfcompanion::Updates updates;
     while (true) {
         if (!session_) {
-            if (linked_.exchange(false))
+            if (linked_.exchange(false)) {
+                // Preserve one useful reason across a later power cycle, with
+                // bounded NVS writes if an unstable cable repeatedly reconnects.
+                int64_t now = esp_timer_get_time() / 1000;
+                if (now - last_diagnostic_save >= 600000) {
+                    Settings diagnostic("df_diag", true);
+                    diagnostic.SetString("disconnect", last_disconnect_.load());
+                    last_diagnostic_save = now;
+                }
                 Application::GetInstance().SuspendVoiceSession();
+            }
             {
                 std::lock_guard<std::mutex> guard(mutex_);
                 for (auto& job : jobs_)
@@ -687,17 +794,22 @@ void DeepFlipperBridge::Run() {
                 continue;
             }
             linked_ = true;
-            Call(PublicResult(0, true));
+            updates = dfcompanion::Updates{};
+            last_report = 0;
         }
         if (esp_timer_get_time() / 1000 - last_report >= 1000) {
             last_report = esp_timer_get_time() / 1000;
-            Call(PublicResult(0, true));
+            auto report = PublicResult(0, true);
+            if (updates.Report(last_report, report))
+                Call(report);
         }
-        auto poll = cJSON_Parse(Call("{\"op\":\"poll\"}").c_str());
-        auto command = cJSON_GetObjectItem(poll, "command");
-        if (cJSON_IsObject(command))
-            ApplyCommand(Serialize(command));
-        cJSON_Delete(poll);
+        if (updates.Poll(esp_timer_get_time() / 1000)) {
+            auto poll = cJSON_Parse(Call("{\"op\":\"poll\"}").c_str());
+            auto command = cJSON_GetObjectItem(poll, "command");
+            if (cJSON_IsObject(command))
+                ApplyCommand(Serialize(command));
+            cJSON_Delete(poll);
+        }
         std::string result;
         {
             std::lock_guard<std::mutex> guard(mutex_);
@@ -710,13 +822,16 @@ void DeepFlipperBridge::Run() {
         if (!muted_ && audio_tick &&
             static_cast<uint32_t>(esp_timer_get_time() / 1000) - audio_tick < 150)
             s = 6;
-        auto ui = cJSON_CreateObject();
-        cJSON_AddStringToObject(ui, "op", "ui");
-        cJSON_AddNumberToObject(ui, "state", s);
-        cJSON_AddNumberToObject(ui, "mouth", mouth_);
-        cJSON_AddNumberToObject(ui, "emotion", emotion_);
-        Call(Serialize(ui));
-        cJSON_Delete(ui);
+        int mouth = mouth_, emotion = emotion_;
+        if (updates.Ui(esp_timer_get_time() / 1000, s, mouth, emotion)) {
+            auto ui = cJSON_CreateObject();
+            cJSON_AddStringToObject(ui, "op", "ui");
+            cJSON_AddNumberToObject(ui, "state", s);
+            cJSON_AddNumberToObject(ui, "mouth", mouth);
+            cJSON_AddNumberToObject(ui, "emotion", emotion);
+            Call(Serialize(ui));
+            cJSON_Delete(ui);
+        }
         tool_active_ = false;
         for (size_t index = 0; index < jobs_.size() && session_; index++) {
             JobEntry job;
@@ -770,7 +885,7 @@ void DeepFlipperBridge::Run() {
                 cJSON_AddBoolToObject(parsed, "uart_fallback", link_rate_.Fallback());
                 reply = Serialize(parsed);
             }
-            auto remote = Integer(parsed, "job");
+            auto remote = dfcompanion::UInt32(parsed, "job");
             auto status = String(parsed, "state");
             bool complete = !remote || (status != "accepted" && status != "running");
             if (!complete)
@@ -788,6 +903,9 @@ void DeepFlipperBridge::Run() {
             cJSON_Delete(parsed);
         }
         UpdateLed();
+        // Drain heartbeat/status traffic even when no UI/profile update is due.
+        if (session_)
+            ReadFrame(5);
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 }

@@ -3,6 +3,7 @@
 #include <applications.h>
 #include <assets_icons.h>
 #include <loader/loader.h>
+#include <deepflipper/deepflipper.h>
 
 #include "../desktop_i.h"
 #include "../views/desktop_events.h"
@@ -119,6 +120,13 @@ bool desktop_scene_main_on_event(void* context, SceneManagerEvent event) {
     if(event.type == SceneManagerEventTypeCustom) {
         switch(event.event) {
         case DesktopMainEventOpenMenu: {
+            DeepFlipperSnapshot snapshot;
+            deepflipper_snapshot(&snapshot);
+            if(snapshot.enabled) {
+                deepflipper_module_command("talk", "toggle");
+                consumed = true;
+                break;
+            }
             Loader* loader = furi_record_open(RECORD_LOADER);
             loader_show_menu(loader);
             furi_record_close(RECORD_LOADER);
@@ -174,11 +182,17 @@ bool desktop_scene_main_on_event(void* context, SceneManagerEvent event) {
                 desktop, &desktop->settings.favorite_apps[FavoriteAppRightLong]);
             consumed = true;
             break;
-        case DesktopMainEventOpenFavoriteOkLong:
-            desktop_scene_main_start_favorite(
-                desktop, &desktop->settings.favorite_apps[FavoriteAppOkLong]);
+        case DesktopMainEventOpenFavoriteOkLong: {
+            DeepFlipperSnapshot snapshot;
+            deepflipper_snapshot(&snapshot);
+            if(snapshot.enabled) {
+                loader_show_menu(desktop->loader);
+            } else {
+                desktop_scene_main_start_favorite(
+                    desktop, &desktop->settings.favorite_apps[FavoriteAppOkLong]);
+            }
             consumed = true;
-            break;
+        } break;
 
         case DesktopAnimationEventCheckAnimation:
             animation_manager_check_blocking_process(desktop->animation_manager);

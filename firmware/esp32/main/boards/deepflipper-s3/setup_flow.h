@@ -62,6 +62,14 @@ public:
     }
 };
 
+enum class TalkAction { Reject, Start, Stop };
+inline TalkAction DecideTalk(const std::string& action, bool listening, bool can_start) {
+    if ((action == "toggle" || action == "stop") && listening)
+        return TalkAction::Stop;
+    if ((action == "toggle" || action == "start") && !listening && can_start)
+        return TalkAction::Start;
+    return TalkAction::Reject;
+}
 inline const char* TalkError(bool wifi, bool link, bool configured, bool microphone, bool busy,
                              bool ready) {
     if (!wifi)
@@ -91,8 +99,9 @@ inline int VisualState(bool configured, bool link, bool wifi, bool ap, const std
         return 1;
     if (!link || !wifi || server == "connecting")
         return 2;
-    if (server == "auth_failed" || server == "connect_failed" || server == "dns_failed" ||
-        server == "tls_failed" || server == "hello_timeout" || server == "invalid_hello")
+    if (server == "auth_failed" || server == "connect_failed" || server == "connect_timeout" ||
+        server == "dns_failed" || server == "tls_failed" || server == "hello_timeout" ||
+        server == "invalid_hello")
         return 8;
     return application_state;
 }
