@@ -829,6 +829,17 @@ void Application::StartListening() { xEventGroupSetBits(event_group_, MAIN_EVENT
 
 void Application::StopListening() { xEventGroupSetBits(event_group_, MAIN_EVENT_STOP_LISTENING); }
 
+void Application::CancelListening() {
+    auto state = GetDeviceState();
+    if (state != kDeviceStateListening && state != kDeviceStateSpeaking)
+        return;
+    audio_service_.EnableVoiceProcessing(false);
+    while (audio_service_.PopPacketFromSendQueue()) {
+    }
+    AbortSpeaking(kAbortReasonNone);
+    SetDeviceState(kDeviceStateIdle);
+}
+
 void Application::HandleToggleChatEvent() {
     auto state = GetDeviceState();
 

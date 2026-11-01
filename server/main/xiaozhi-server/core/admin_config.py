@@ -64,6 +64,7 @@ class AdminConfig:
             'tool_calling': selected.get('Intent') == 'function_call',
             'asr': selected.get('ASR', ''), 'tts': selected.get('TTS', ''),
             'tts_provider': selected.get('TTS', 'EdgeTTS'),
+            'tts_speed': float(config.get('TTS', {}).get('LocalTTS', {}).get('speed', 1.0)),
             'context_turns': config.get('context_turns',6),
             'tts_voice': config.get('TTS', {}).get('EdgeTTS', {}).get('voice', 'zh-CN-XiaoxiaoNeural'),
             'websocket': config.get('server', {}).get('websocket', ''),
@@ -109,9 +110,14 @@ class AdminConfig:
             provider, old = 'DeepFlipperLLM', {}
         custom.setdefault('selected_module', {})['LLM'] = provider
         custom['selected_module']['TTS'] = tts_provider
-        if tts_provider == 'LocalTTS':
-            custom.setdefault('TTS', {})['LocalTTS'] = {
-                **LOCAL_TTS, **merged.get('TTS', {}).get('LocalTTS', {})}
+        local_tts = {**LOCAL_TTS, **merged.get('TTS', {}).get('LocalTTS', {})}
+        if 'tts_speed' in payload:
+            speed = float(payload['tts_speed'])
+            if not 0.5 <= speed <= 2.0:
+                raise ValueError('本地语音语速范围应为 0.5–2.0')
+            local_tts['speed'] = round(speed, 2)
+        if tts_provider == 'LocalTTS' or 'tts_speed' in payload:
+            custom.setdefault('TTS', {})['LocalTTS'] = local_tts
         if 'tool_calling' in payload:
             if not isinstance(payload['tool_calling'], bool):
                 raise ValueError('工具调用选项应为布尔值')

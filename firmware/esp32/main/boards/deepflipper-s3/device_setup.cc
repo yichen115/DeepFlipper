@@ -313,14 +313,17 @@ bool DeviceSetup::Talk(const std::string& action) {
     if (standby_)
         return Queue(CommandType::Wake);
     auto& app = Application::GetInstance();
-    auto decision =
-        dfsetup::DecideTalk(action, app.GetDeviceState() == kDeviceStateListening, ReadyToTalk());
+    const auto state = app.GetDeviceState();
+    auto decision = dfsetup::DecideTalk(action, state == kDeviceStateListening, ReadyToTalk(),
+                                        state == kDeviceStateSpeaking);
     if (decision == dfsetup::TalkAction::Reject)
         return false;
     // UART, GPIO button and HTTP all enter through the same main-task path.
     app.Schedule([this, decision]() {
         auto& app = Application::GetInstance();
-        if (decision == dfsetup::TalkAction::Stop) {
+        if (decision == dfsetup::TalkAction::Cancel) {
+            app.CancelListening();
+        } else if (decision == dfsetup::TalkAction::Stop) {
             if (app.GetDeviceState() == kDeviceStateListening)
                 app.StopListening();
         } else if (ReadyToTalk()) {

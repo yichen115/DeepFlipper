@@ -8,6 +8,7 @@ let previewGeneration = 0;
 let streamTesting = false;
 function refreshTts() {
   const local=$('tts-provider').value==='LocalTTS';
+  $('tts-speed').disabled=!local;
   $('tts-voice').disabled=local;
   $('tts-hint').textContent=local?'使用本机 CPU 合成中文／英文，不访问微软接口。首次请运行 python scripts/download_models.py --tts-only。':'EdgeTTS 需要服务器能够连接微软语音服务；网络不可用时建议切换本地合成。';
 }
@@ -48,7 +49,8 @@ function showLogin() {
 function draft() {
   return { revision, base_url: $('base-url').value.trim(), model_name: $('model-name').value.trim(),
     api_key: $('api-key').value.trim(), clear_api_key: $('clear-key').checked,
-    prompt: $('prompt').value, context_turns:Number($('context-turns').value),tts_voice: $('tts-voice').value.trim(), tts_provider:$('tts-provider').value, tool_calling: $('tool-calling').checked };
+    prompt: $('prompt').value, context_turns:Number($('context-turns').value),tts_voice: $('tts-voice').value.trim(),
+    tts_speed: Number($('tts-speed').value || 1.0), tts_provider:$('tts-provider').value, tool_calling: $('tool-calling').checked };
 }
 function invalidateConnection() {
   if(connectionProfile) message('设备信息已改变，旧连接配置已收起，请重新生成。');
@@ -59,6 +61,7 @@ async function loadSettings() {
   const data = await api('/api/settings'); revision = data.revision;
   for (const [id, value] of [['base-url', data.base_url], ['model-name', data.model_name],
     ['prompt', data.prompt], ['tts-voice', data.tts_voice], ['voice-url', data.websocket]]) $(id).value = value || '';
+  $('tts-speed').value = String(data.tts_speed ?? 1.0);
   $('key-state').textContent = data.api_key_set ? '已保存 · 不回显' : '尚未配置';
   $('api-key').value = ''; $('clear-key').checked = false;
   $('tool-calling').checked = data.tool_calling;
@@ -196,7 +199,7 @@ $('tts-provider').addEventListener('change',refreshTts);
 async function testTts(mode) {
   const generation=++previewGeneration;
   message('正在生成试听音频…');
-  const response=await fetch('/api/tts-test',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({tts_provider:$('tts-provider').value,preview_mode:mode})});
+  const response=await fetch('/api/tts-test',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({tts_provider:$('tts-provider').value,tts_speed:Number($('tts-speed').value||1.0),preview_mode:mode})});
   if(!response.ok){if(response.status===401)showLogin();const text=await response.text();let error;try{error=JSON.parse(text).error;}catch{error=text;}throw new Error(error||'试听失败');}
   const audio=await response.blob();
   if($('console').hidden || generation!==previewGeneration)return;

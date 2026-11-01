@@ -23,6 +23,8 @@ class AudioRateController:
         """
         # 流控间隔（毫秒）：send_delay > 0 时用配置值，否则用 frame_duration
         self.interval_ms = send_delay if send_delay > 0 else frame_duration
+        self._custom_delay = send_delay > 0
+        self._lead_ms = 0
         self.queue = deque()
         self.play_position = 0  # 虚拟播放位置（毫秒）
         self.start_timestamp = None  # 开始时间戳（只读，不修改）
@@ -41,6 +43,7 @@ class AudioRateController:
 
         self.queue.clear()
         self.play_position = 0
+        self._lead_ms = 0
         self.start_timestamp = None  # 由首个音频包设置
         self._last_queue_empty_time = 0  # 重置时间
         # 相关事件处理
@@ -97,6 +100,7 @@ class AudioRateController:
         if self.queue or not self.queue_empty_event.is_set():
             return False
         self.play_position = 0
+        self._lead_ms = 0
         self.start_timestamp = None
         self._last_queue_empty_time = time.monotonic()
         return True
@@ -152,7 +156,12 @@ class AudioRateController:
 
                 # 时间已到，从队列移除并发送
                 self.queue.popleft()
-                self.play_position += self.interval_ms
+                if not self._custom_delay and self._lead_ms < 360:
+                    step_ms = max(1, self.interval_ms - 4)
+                    self._lead_ms += self.interval_ms - step_ms
+                else:
+                    step_ms = self.interval_ms
+                self.play_position += step_ms
                 sent_audio = True
                 try:
                     await send_audio_callback(opus_packet)

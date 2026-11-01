@@ -162,7 +162,13 @@ class AdminServer:
         from core.utils.modules_initialize import initialize_tts
         _, config = self.store.read()
         config.setdefault('selected_module', {})['TTS'] = selected
-        config.setdefault('TTS', {}).setdefault('LocalTTS', LOCAL_TTS.copy())
+        local_tts = {**LOCAL_TTS, **config.get('TTS', {}).get('LocalTTS', {})}
+        if 'tts_speed' in payload:
+            speed = float(payload['tts_speed'])
+            if not 0.5 <= speed <= 2.0:
+                raise ValueError('本地语音语速范围应为 0.5–2.0')
+            local_tts['speed'] = round(speed, 2)
+        config.setdefault('TTS', {})['LocalTTS'] = local_tts
         try:
             tts = await asyncio.to_thread(initialize_tts, config)
             audio = await asyncio.wait_for(tts.text_to_speak('你好，我是鲸鱼娘。语音测试成功。', None), 20)

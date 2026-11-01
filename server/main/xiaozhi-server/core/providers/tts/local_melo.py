@@ -16,9 +16,18 @@ from core.providers.tts.base import TTSProviderBase
 from core.tts_settings import local_model_files
 from core.utils.speech_level import normalize_speech
 
-_SD_PATH_RE = re.compile(r'/ext/[A-Za-z0-9_./-]+')
+_SD_PATH_RE = re.compile(
+    r'(?:/ext/)?(?:nfc|subghz|infrared|lfrfid|ibutton|apps)/[A-Za-z0-9_./-]+'
+    r'|/ext/[A-Za-z0-9_./-]+'
+    r'|[A-Za-z0-9_-]+_\d{6,}_\d+\.[a-z]{2,4}'
+)
 _ENG_WORD_RE = re.compile(r'[A-Za-z]+')
+_HEX_UID_RE = re.compile(r'\b(?:[0-9A-Fa-f]{2}\s+){2,7}[0-9A-Fa-f]{2}\b|\b(?=[0-9A-Fa-f]*[A-Fa-f])(?=[0-9A-Fa-f]*\d)[0-9A-Fa-f]{6,16}\b')
 _LETTER_DIGIT_RE = re.compile(r'([A-Za-z])(\d)|(\d)([A-Za-z])')
+_CN_EN_RE = re.compile(r'([\u4e00-\u9fff])\s*([A-Za-z])')
+_EN_CN_RE = re.compile(r'([A-Za-z])\s*([\u4e00-\u9fff])')
+_CLAUSE_SPLIT_RE = re.compile(r'([。！？!?\n；;，,：:])')
+_SENTENCE_END_PUNCTS = frozenset('。！？!?\n；;')
 _COMPOUND_TERMS = {
     'deepflipper': 'deep flipper',
     'mifare': 'mi fare',
@@ -27,7 +36,7 @@ _COMPOUND_TERMS = {
     'ghz': 'giga hertz',
     'mhz': 'mega hertz',
     'khz': 'kilo hertz',
-    'wifi': 'w i f i',
+    'wifi': 'w、i、f、i',
 }
 
 
@@ -45,10 +54,17 @@ def _lexicon_words(model_dir: str) -> frozenset:
     return frozenset(words)
 
 
+def _format_hex_uid(match: re.Match) -> str:
+    raw = re.sub(r'\s+', '', match.group(0)).lower()
+    pairs = [' '.join(raw[i:i + 2]) for i in range(0, len(raw), 2)]
+    return '、'.join(pairs)
+
+
 def _prepare_spoken_text(text: str, model_dir: str = '') -> str:
     text = _SD_PATH_RE.sub(' S D 卡文件 ', text)
     text = (text.replace('Wi-Fi', 'wifi').replace('wi-fi', 'wifi').replace('Sub-GHz', 'sub ghz')
-            .replace('——', '，').replace('—', '，').replace('；', '，').replace(';', '，'))
+            .replace('——', '，').replace('—', '，'))
+    text = _HEX_UID_RE.sub(_format_hex_uid, text)
     text = _LETTER_DIGIT_RE.sub(lambda m: f'{m.group(1) or m.group(3)} {m.group(2) or m.group(4)}', text)
     text = _LETTER_DIGIT_RE.sub(lambda m: f'{m.group(1) or m.group(3)} {m.group(2) or m.group(4)}', text)
     vocab = _lexicon_words(model_dir) if model_dir else frozenset()
@@ -61,35 +77,39 @@ def _prepare_spoken_text(text: str, model_dir: str = '') -> str:
         if len(word) == 1:
             return low
         if word.isupper() and len(word) <= 4:
-            return ' '.join(low)
+            return '、'.join(low)
         if vocab and low not in vocab:
-            return ' '.join(low)
+            return '、'.join(low)
         return low
     out = _ENG_WORD_RE.sub(_norm_word, text).strip()
+    # Add a slight prosodic pause at Chinese<->English transitions so English words/acronyms
+    # (like UID, NFC, Mifare) never collide into adjacent Chinese syllables without a gap.
+    out = _CN_EN_RE.sub(r'\1、\2', out)
+    out = _EN_CN_RE.sub(r'\1、\2', out)
     if out and out[-1] not in '。！？!?.':
         out += '。'
     return out
 
 
-def _shape_and_resample(samples: np.ndarray, sample_rate: int, target_rate: int = 24000) -> tuple[np.ndarray, int]:
-    if samples.size < max(160, sample_rate // 10):
-        return samples, sample_rate
-    fade = min(int(sample_rate * 0.012), samples.size // 4)
-    if fade > 1:
-        ramp = np.linspace(0.0, 1.0, fade, dtype=np.float32)
-        samples = samples.copy()
-        samples[:fade] *= ramp
-        samples[-fade:] *= ramp[::-1]
-    lead = np.zeros(int(sample_rate * 0.12), dtype=np.float32)
-    tail = np.zeros(int(sample_rate * 0.12), dtype=np.float32)
-    padded = np.concatenate((lead, samples, tail))
-    if sample_rate != target_rate and target_rate > 0:
-        target_len = max(1, int(round(padded.size * target_rate / sample_rate)))
-        x_old = np.linspace(0.0, 1.0, num=padded.size, endpoint=False)
-        x_new = np.linspace(0.0, 1.0, num=target_len, endpoint=False)
-        padded = np.interp(x_new, x_old, padded).astype(np.float32)
-        return padded, target_rate
-    return padded, sample_rate
+def _split_sentences(spoken: str) -> list[tuple[str, float]]:
+    parts = _CLAUSE_SPLIT_RE.split(spoken)
+    clauses = []
+    current = ''
+    for token in parts:
+        if not token:
+            continue
+        if token in _SENTENCE_END_PUNCTS or token in '，,：:':
+            clause = current.strip(' 、')
+            if clause:
+                pause_sec = 0.35 if token in _SENTENCE_END_PUNCTS else 0.22
+                clauses.append((clause + '。', pause_sec))
+            current = ''
+        else:
+            current += token
+    tail = current.strip(' 、')
+    if tail:
+        clauses.append((tail + '。', 0.12))
+    return clauses or [(spoken, 0.12)]
 
 
 @lru_cache(maxsize=2)
@@ -103,7 +123,7 @@ def engine(model_dir, threads):
                 lexicon=str(directory / 'lexicon.txt'), dict_dir=str(directory / 'dict')),
             num_threads=threads, provider='cpu', debug=False),
         rule_fsts=','.join(str(directory / name) for name in ('date.fst', 'number.fst', 'phone.fst')
-                          if (directory / name).is_file()), max_num_sentences=20)
+                          if (directory / name).is_file()), max_num_sentences=1)
     if not config.validate():
         raise ValueError('Invalid local TTS model configuration')
     return sherpa_onnx.OfflineTts(config), threading.Lock()
@@ -134,21 +154,34 @@ class TTSProvider(TTSProviderBase):
             def cancelled(samples, progress):
                 return int(time.monotonic() >= deadline or
                            bool(self.conn and (self.conn.stop_event.is_set() or self.conn.client_abort)))
-            # sherpa's native callback returns 1 to continue and 0 to stop.
-            audio = self.engine.generate(spoken, sid=self.speaker, speed=self.speed,
-                                         callback=lambda samples, progress: int(not cancelled(samples, progress)))
-            if cancelled(None, None):
-                raise TimeoutError('Local TTS cancelled or timed out')
-            samples = np.asarray(audio.samples, dtype=np.float32)
-            if not samples.size or not np.isfinite(samples).all():
+            sentences = _split_sentences(spoken)
+            chunks = []
+            sample_rate = 24000
+            for idx, (sent, pause_sec) in enumerate(sentences):
+                # sherpa's native callback returns 1 to continue and 0 to stop.
+                audio = self.engine.generate(sent, sid=self.speaker, speed=self.speed,
+                                             callback=lambda samples, progress: int(not cancelled(samples, progress)))
+                if cancelled(None, None):
+                    raise TimeoutError('Local TTS cancelled or timed out')
+                part = np.asarray(audio.samples, dtype=np.float32)
+                if not part.size or not np.isfinite(part).all():
+                    continue
+                sample_rate = int(audio.sample_rate)
+                if not chunks and part.size >= max(160, sample_rate // 10):
+                    # Ensure utterance head has a 140ms lead-in even when starting with English.
+                    chunks.append(np.zeros(int(sample_rate * 0.14), dtype=np.float32))
+                chunks.append(part)
+                if idx < len(sentences) - 1 and part.size >= max(160, sample_rate // 10):
+                    chunks.append(np.zeros(int(sample_rate * pause_sec), dtype=np.float32))
+            if not chunks:
                 raise ValueError('Local TTS generated no valid audio')
+            samples = np.concatenate(chunks) if len(chunks) > 1 else chunks[0]
             samples = normalize_speech(samples)
-            samples, out_rate = _shape_and_resample(samples, int(audio.sample_rate), 24000)
             buffer = io.BytesIO()
             with wave.open(buffer, 'wb') as output:
                 output.setnchannels(1)
                 output.setsampwidth(2)
-                output.setframerate(out_rate)
+                output.setframerate(sample_rate)
                 output.writeframes((np.clip(samples, -1, 1) * 32767).astype('<i2').tobytes())
             return buffer.getvalue()
         finally:

@@ -164,7 +164,10 @@ class TTSProviderBase(ABC):
                         )
                         # 使用原始文本用于显示/上报，等当前句编码完成后再一并入队，避免 sentence_start 抢跑导致句首断流
                         self.tts_audio_queue.put((SentenceType.FIRST, None, original_text, getattr(self, 'current_sentence_id', None)))
-                        if opus_handler is not None:
+                        if opus_handler == self.handle_opus:
+                            if frames:
+                                self.tts_audio_queue.put((SentenceType.MIDDLE, frames, None, getattr(self, 'current_sentence_id', None)))
+                        elif opus_handler is not None:
                             for frame in frames:
                                 opus_handler(frame)
                         break
@@ -494,6 +497,8 @@ class TTSProviderBase(ABC):
                 # 收集上报音频数据
                 if isinstance(audio_datas, bytes):
                     enqueue_audio.append(audio_datas)
+                elif isinstance(audio_datas, list):
+                    enqueue_audio.extend(d for d in audio_datas if isinstance(d, bytes))
 
                 # 发送音频
                 future = asyncio.run_coroutine_threadsafe(

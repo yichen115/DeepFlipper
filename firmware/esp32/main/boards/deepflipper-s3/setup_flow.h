@@ -62,8 +62,11 @@ public:
     }
 };
 
-enum class TalkAction { Reject, Start, Stop };
-inline TalkAction DecideTalk(const std::string& action, bool listening, bool can_start) {
+enum class TalkAction { Reject, Start, Stop, Cancel };
+inline TalkAction DecideTalk(const std::string& action, bool listening, bool can_start,
+                             bool speaking = false) {
+    if (action == "cancel" && (listening || speaking))
+        return TalkAction::Cancel;
     if ((action == "toggle" || action == "stop") && listening)
         return TalkAction::Stop;
     if ((action == "toggle" || action == "start") && !listening && can_start)

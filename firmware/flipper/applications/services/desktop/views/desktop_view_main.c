@@ -117,6 +117,13 @@ bool desktop_main_input_callback(InputEvent* event, void* context) {
             furi_timer_start(main_view->poweroff_timer, DESKTOP_MAIN_VIEW_POWEROFF_TIMEOUT);
         } else if(event->type == InputTypeRelease) {
             furi_timer_stop(main_view->poweroff_timer);
+        } else if(event->type == InputTypeShort) {
+            DeepFlipperSnapshot snapshot;
+            deepflipper_snapshot(&snapshot);
+            if(snapshot.enabled && snapshot.connected &&
+               (snapshot.state == DeepFlipperListening || snapshot.state == DeepFlipperSpeaking)) {
+                deepflipper_module_command("talk", "cancel");
+            }
         }
     }
 

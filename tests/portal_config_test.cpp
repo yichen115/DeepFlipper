@@ -82,6 +82,9 @@ int main() {
     assert(DecideTalk("start",true,true)==TalkAction::Reject);
     assert(DecideTalk("stop",false,true)==TalkAction::Reject);
     assert(DecideTalk("toggle",false,false)==TalkAction::Reject);
+    assert(DecideTalk("cancel",true,false)==TalkAction::Cancel);
+    assert(DecideTalk("cancel",false,true,true)==TalkAction::Cancel);
+    assert(DecideTalk("cancel",false,true,false)==TalkAction::Reject);
     assert(DecideTalk("unknown",false,true)==TalkAction::Reject);
     assert(VisualState(true,true,true,false,"auth_failed",3)==8);
     assert(VisualState(true,true,true,false,"connect_timeout",3)==8);
