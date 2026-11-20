@@ -852,8 +852,27 @@ static void loader_do_check_loading(Loader* loader) {
     }
 }
 
-static bool loader_prepare_deepflipper(bool keep_rpc, const char* args) {
+// Local launches normally release the AI UART (heap for big apps, free pins for UART apps).
+// These pages are where the user talks to or configures the assistant, so keep it:
+// the AI Assistant settings page and Whale Pet (home Right shortcut or Apps > Games).
+static bool loader_deepflipper_keeps_link(const char* appid, const char* name) {
+    if(appid && strcmp(appid, "deepflipper_settings") == 0) return true;
+    if(!name) return false;
+    static const char pet[] = "/apps/Games/whale_pet.fap";
+    for(size_t i = 0; i < 2; i++) {
+        const char* root = i == 0 ? "/ext" : "/any";
+        if(strncmp(name, root, 4) == 0 && strcmp(name + 4, pet) == 0) return true;
+    }
+    return false;
+}
+
+static bool loader_prepare_deepflipper(bool keep_rpc, const char* args, bool keep_link) {
     if(!deepflipper_prepare_app_start()) return false;
+    if(keep_link) {
+        // The assistant pages need a live UART to show status, send commands and talk.
+        deepflipper_set_settings_foreground();
+        return true;
+    }
     // RPC-origin launches must retain their own command session, including
     // native app.open calls without an "RPC" argument.
     return keep_rpc || loader_do_args_are_rpc(args) || deepflipper_app_suspend_uart();
@@ -900,7 +919,9 @@ static LoaderMessageLoaderStatusResult loader_do_start_by_name(
 
         LoaderEvent event;
         event.type = LoaderEventTypeApplicationBeforeLoad;
-        if(!loader_prepare_deepflipper(keep_rpc, args)) {
+        const FlipperInternalApplication* app = loader_find_application_by_name(name);
+        bool keep_link = loader_deepflipper_keeps_link(app ? app->appid : NULL, name);
+        if(!loader_prepare_deepflipper(keep_rpc, args, keep_link)) {
             deepflipper_app_finished();
             status.value = loader_make_status_error(
                 LoaderStatusErrorInternal, error_message, "AI command is stopping; try again");
@@ -913,17 +934,13 @@ static LoaderMessageLoaderStatusResult loader_do_start_by_name(
         // whichever launch it started with, which need not be the one that started the app
         loader->app.rpc = loader_do_args_are_rpc(args);
 
-        // check internal apps
-        {
-            const FlipperInternalApplication* app = loader_find_application_by_name(name);
-            if(app) {
-                // Nothing to read, but an internal app pays its own startup in full (SubGHz)
-                loader_do_show_loading(loader);
-                loader_start_internal_app(loader, app, args);
-                loader_do_hide_loading(loader);
-                status.value = loader_make_success_status(error_message);
-                break;
-            }
+        if(app) {
+            // Nothing to read, but an internal app pays its own startup in full (SubGHz)
+            loader_do_show_loading(loader);
+            loader_start_internal_app(loader, app, args);
+            loader_do_hide_loading(loader);
+            status.value = loader_make_success_status(error_message);
+            break;
         }
 
         // check External Applications

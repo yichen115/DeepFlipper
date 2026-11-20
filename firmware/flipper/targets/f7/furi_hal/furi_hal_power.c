@@ -1,4 +1,5 @@
 #include <furi_hal_power.h>
+#include <furi_hal_power_i.h>
 #include <furi_hal_clock.h>
 #include <furi_hal_bt.h>
 #include <furi_hal_vibro.h>
@@ -40,6 +41,7 @@ typedef struct {
 
     bool gauge_ok;
     bool charger_ok;
+    bool otg_hold;
 } FuriHalPower;
 
 static volatile FuriHalPower furi_hal_power = {
@@ -47,6 +49,7 @@ static volatile FuriHalPower furi_hal_power = {
     .suppress_charge = 0,
     .gauge_ok = false,
     .charger_ok = false,
+    .otg_hold = false,
 };
 
 extern const BQ27220DMData furi_hal_power_gauge_data_memory[];
@@ -363,9 +366,22 @@ bool furi_hal_power_enable_otg(void) {
 }
 
 void furi_hal_power_disable_otg(void) {
+    if(furi_hal_power.otg_hold) {
+        // An accessory still runs from this rail; the caller only wanted its own module off.
+        FURI_LOG_D(TAG, "OTG kept on: held for accessory");
+        return;
+    }
     furi_hal_i2c_acquire(&furi_hal_i2c_handle_power);
     bq25896_disable_otg(&furi_hal_i2c_handle_power);
     furi_hal_i2c_release(&furi_hal_i2c_handle_power);
+}
+
+void furi_hal_power_otg_hold(bool hold) {
+    furi_hal_power.otg_hold = hold;
+}
+
+bool furi_hal_power_is_otg_held(void) {
+    return furi_hal_power.otg_hold;
 }
 
 bool furi_hal_power_is_otg_enabled(void) {

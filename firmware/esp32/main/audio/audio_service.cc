@@ -150,24 +150,28 @@ void AudioService::Start() {
         },
         "audio_input", 2048 * 2, this, 8, &audio_input_task_handle_);
 
-    /* Start the audio output task */
+    /* Start the audio output task. 4 KB: the codec write path logs and calls
+       into board code, so 2 KB left too little headroom. */
     xTaskCreate(
         [](void* arg) {
             AudioService* audio_service = (AudioService*)arg;
             audio_service->AudioOutputTask();
             vTaskDelete(NULL);
         },
-        "audio_output", 2048, this, 4, &audio_output_task_handle_);
+        "audio_output", 2048 * 2, this, 4, &audio_output_task_handle_);
 #endif
 
-    /* Start the opus codec task */
+    /* Start the opus codec task. Priority 3: above the WebSocket receive task
+       (1) so decode keeps the playback queue fed, equal to the board link
+       tasks, and below audio_output (4) so the real-time consumer is never
+       starved by decode. */
     xTaskCreate(
         [](void* arg) {
             AudioService* audio_service = (AudioService*)arg;
             audio_service->OpusCodecTask();
             vTaskDelete(NULL);
         },
-        "opus_codec", 2048 * 12, this, 2, &opus_codec_task_handle_);
+        "opus_codec", 2048 * 12, this, 3, &opus_codec_task_handle_);
 }
 
 void AudioService::Stop() {

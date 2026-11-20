@@ -1,7 +1,9 @@
 """Small authenticated settings page hosted by the existing Python process."""
 import asyncio
+import base64
 import hmac
 import ipaddress
+import json
 import os
 from pathlib import Path
 import re
@@ -135,6 +137,12 @@ class AdminServer:
         result = await asyncio.to_thread(history_for(str(self.root)).read, device, before)
         return web.json_response(result)
 
+    async def history_image(self, request):
+        path = history_for(str(self.root)).image_path(request.query.get('name', ''))
+        if path is None:
+            raise web.HTTPNotFound(text='截图不存在或已清理')
+        return web.FileResponse(path, headers={'Content-Type': 'image/png'})
+
     async def clear_history(self, request):
         payload = await self.body(request)
         scope, device = payload.get('scope'), payload.get('device', '')
@@ -157,11 +165,14 @@ class AdminServer:
         preview_mode = payload.get('preview_mode', 'source')
         if preview_mode not in ('source', 'opus'):
             raise ValueError('不支持的音频试听模式')
-        if selected not in ('LocalTTS', 'EdgeTTS'):
+        from core.admin_config import TTS_PROVIDERS, breeze_voice
+        if selected not in TTS_PROVIDERS:
             raise ValueError('不支持的语音合成方式')
         from core.utils.modules_initialize import initialize_tts
         _, config = self.store.read()
         config.setdefault('selected_module', {})['TTS'] = selected
+        if 'breeze_voice' in payload:
+            config.setdefault('TTS', {}).setdefault('BreezeTTS', {})['voice_id'] = breeze_voice(payload['breeze_voice'])
         local_tts = {**LOCAL_TTS, **config.get('TTS', {}).get('LocalTTS', {})}
         if 'tts_speed' in payload:
             speed = float(payload['tts_speed'])
@@ -185,6 +196,10 @@ class AdminServer:
             return web.json_response({'error': '缺少本地语音模型，请运行 python scripts/download_models.py --tts-only'}, status=409)
         except (TimeoutError, asyncio.TimeoutError):
             return web.json_response({'error': '语音合成超时，请检查所选服务或本机负载'}, status=504)
+        except Exception as error:
+            if type(error).__name__ != 'BreezeError':
+                raise
+            return web.json_response({'error': f'BreezeTTS：{error}'}, status=502)
 
     def device_credentials(self, payload):
         device, client = payload.get('device_id', ''), payload.get('client_id', '')
@@ -291,6 +306,72 @@ class AdminServer:
         return web.Response(body=self.audio_test_sample, content_type='audio/wav', headers={
             'Content-Disposition': 'attachment; filename="stream-test-reference.wav"'})
 
+    def device_connection(self, device):
+        if not isinstance(device, str) or not device or len(device) > 80:
+            raise ValueError('请选择已连接的设备')
+        connections = list(getattr(getattr(self.runtime, 'server', None), 'connections', ()))
+        targets = [conn for conn in connections if getattr(conn, 'device_id', None) == device
+                   and not conn.stop_event.is_set()]
+        return targets[-1] if targets else None
+
+    @staticmethod
+    def screen_payload(conn):
+        screen = dict(getattr(conn, 'last_screen', None) or {})
+        png = getattr(conn, 'last_screen_png', None)
+        return {'ok': True, 'device_id': getattr(conn, 'device_id', ''),
+                'app': str(screen.get('app') or ''), 'view': str(screen.get('view') or ''),
+                'selected': str(screen.get('selected') or ''), 'locked': bool(screen.get('locked')),
+                'time': screen.get('time', 0),
+                'png': base64.b64encode(png).decode('ascii') if png else '',
+                'png_time': getattr(conn, 'last_screen_png_time', 0) if png else 0}
+
+    async def flipper_screen(self, request):
+        conn = self.device_connection(request.query.get('device', ''))
+        if conn is None:
+            return web.json_response({'error': '该设备当前没有语音连接'}, status=404)
+        return web.json_response(self.screen_payload(conn))
+
+    async def refresh_flipper_screen(self, request):
+        """Ask the device for one fresh frame through its MCP link (no key presses)."""
+        payload = await self.body(request)
+        conn = self.device_connection(payload.get('device_id'))
+        if conn is None:
+            return web.json_response({'error': '请先让该设备建立语音连接'}, status=409)
+        client = getattr(conn, 'mcp_client', None)
+        if not client or not await client.is_ready() or not client.has_tool('flipper_screen'):
+            return web.json_response({'error': '设备没有提供 flipper_screen 工具，请更新 ESP32 固件'}, status=409)
+        from core.providers.tools.device_mcp.mcp_handler import call_mcp_tool
+        from core.providers.tools.device_mcp.deepflipper_jobs import await_flipper_job
+        from core.utils import flipper_screen
+
+        async def read_screen():
+            async def call(name, arguments):
+                return await call_mcp_tool(conn, client, name, arguments, timeout=10)
+            result = await call('flipper_screen', json.dumps({'bitmap': True}))
+            result = await await_flipper_job(result, call, timeout=10)
+            _, png, data = flipper_screen.split_screenshot(result)
+            flipper_screen.remember_screen(conn, 'flipper_screen', data, png)
+            return png, data
+
+        try:
+            loop = getattr(conn, 'loop', None)
+            if loop is not None and loop is not asyncio.get_running_loop():
+                # Device I/O must run on the connection's own event loop.
+                future = asyncio.run_coroutine_threadsafe(read_screen(), loop)
+                png, data = await asyncio.wait_for(asyncio.wrap_future(future), 25)
+            else:
+                png, data = await asyncio.wait_for(read_screen(), 25)
+        except (TimeoutError, asyncio.TimeoutError):
+            return web.json_response({'error': '读取屏幕超时，请稍后重试'}, status=504)
+        except (RuntimeError, ValueError) as error:
+            return web.json_response({'error': f'读取屏幕失败：{error}'}, status=502)
+        if isinstance(data, dict) and data.get('ok') is False:
+            return web.json_response({'error': f"读取屏幕失败：{data.get('code') or data.get('error') or '设备返回错误'}"},
+                                     status=502)
+        if not png:
+            return web.json_response({'error': '设备没有返回截图，请确认 ESP32 与 Flipper 固件已更新'}, status=502)
+        return web.json_response(self.screen_payload(conn))
+
     async def issue_token(self, request):
         result = self.device_credentials(await self.body(request))
         return web.json_response({'token': result['token'], 'expires_in': result['expires_in']})
@@ -351,6 +432,104 @@ class AdminServer:
         except APIConnectionError:
             return web.json_response({'error': '无法连接模型接口，请检查地址和网络'}, status=502)
 
+    # ------------------------------------------------------------ 唱歌（代理到电脑上的 singing/worker.py）
+    def singing_worker(self):
+        _, config = self.store.read()
+        singing = config.get('singing') or {}
+        url = str(singing.get('worker_url') or 'http://host.docker.internal:8790').rstrip('/')
+        token = os.environ.get('SINGING_TOKEN') or str(singing.get('token') or '')
+        return url, token, bool(singing.get('enabled', True))
+
+    async def singing_call(self, method, path, body=None, timeout=8):
+        import aiohttp
+        url, token, _ = self.singing_worker()
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
+                async with session.request(method, url + path, json=body,
+                                           headers={'X-Singing-Token': token}) as response:
+                    try:
+                        data = await response.json(content_type=None)
+                    except ValueError:
+                        data = {}
+                    if response.status == 401:
+                        data = {'error': '唱歌服务口令不对：data/server.env 的 SINGING_TOKEN 要和 singing/token.txt 一致'}
+                    return response.status, data if isinstance(data, dict) else {}
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+            return 503, {'error': f'连不上唱歌服务（{url}）：先在电脑上运行 singing/start_worker.ps1'}
+
+    async def singing(self, request):
+        _, _, enabled = self.singing_worker()
+        status, health = await self.singing_call('GET', '/health')
+        if status != 200:
+            return web.json_response({'enabled': enabled, 'online': False, 'error': health.get('error', '')})
+        _, paths = await self.singing_call('GET', '/config')
+        code, songs = await self.singing_call('GET', '/songs', timeout=20)
+        return web.json_response({'enabled': enabled, 'online': True, 'health': health,
+                                  'config': paths if 'songs_dirs' in paths else None,
+                                  'songs': songs if code == 200 else None,
+                                  'error': '' if 'songs_dirs' in paths else (paths.get('error') or
+                                           '唱歌服务版本较旧，更新 singing/worker.py 后才能在这里改路径')})
+
+    async def singing_config(self, request):
+        payload = await self.body(request)
+        dirs = payload.get('songs_dirs')
+        if isinstance(dirs, str):
+            dirs = [line.strip() for line in dirs.splitlines() if line.strip()]
+        if not isinstance(dirs, list) or not 1 <= len(dirs) <= 8 or not all(isinstance(d, str) for d in dirs):
+            raise ValueError('原曲目录需要 1–8 行')
+        body = {'songs_dirs': dirs}
+        for key in ('download_dir', 'cache_dir'):
+            value = payload.get(key, '')
+            if not isinstance(value, str) or len(value) > 260:
+                raise ValueError('路径过长或格式不对')
+            body[key] = value.strip()
+        status, data = await self.singing_call('PUT', '/config', body)
+        return web.json_response(data, status=status)
+
+    async def singing_download(self, request):
+        payload = await self.body(request)
+        url, title = payload.get('url', ''), payload.get('title', '')
+        if not isinstance(url, str) or not re.fullmatch(r'https?://\S{1,490}', url.strip()):
+            raise ValueError('请粘贴以 http:// 或 https:// 开头的歌曲链接')
+        if not isinstance(title, str) or len(title) > 80:
+            raise ValueError('歌名最多 80 字')
+        status, data = await self.singing_call('POST', '/download',
+                                               {'url': url.strip(), 'title': title.strip(), 'render': True})
+        if status == 503 and data.get('error') == 'yt_dlp_missing':
+            data = {'error': data.get('message') or '电脑上的唱歌环境还没装 yt-dlp'}
+        if status == 202 and data.get('download_id'):
+            data['announce'] = self.follow_singing_download(data['download_id'], title.strip(),
+                                                            payload.get('device_id', ''))
+        return web.json_response(data, status=status)
+
+    def follow_singing_download(self, download_id, title, device=''):
+        """有设备连着时，让鲸鱼娘练好后主动问“要不要听”（和语音点歌同一套流程）。"""
+        import sys
+        plugin = sys.modules.get('plugins_func.functions.sing_song')
+        connections = [conn for conn in getattr(getattr(self.runtime, 'server', None), 'connections', ())
+                       if not conn.stop_event.is_set() and getattr(conn, 'tts', None) is not None
+                       and (not device or getattr(conn, 'device_id', None) == device)]
+        if plugin is None or not connections:
+            return False
+        conn = connections[-1]
+        loop = getattr(conn, 'loop', None)
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if loop is None or loop is running:
+            plugin.follow_download(conn, download_id, title)
+        else:
+            loop.call_soon_threadsafe(plugin.follow_download, conn, download_id, title)
+        return True
+
+    async def singing_download_state(self, request):
+        download_id = request.query.get('id', '')
+        if not re.fullmatch(r'[0-9a-f]{12}', download_id):
+            raise ValueError('下载编号不对')
+        status, data = await self.singing_call('GET', f'/downloads/{download_id}')
+        return web.json_response(data, status=status)
+
     def app(self):
         app = web.Application(middlewares=[self.security], client_max_size=96 * 1024)
         app.add_routes([
@@ -358,12 +537,18 @@ class AdminServer:
             web.post('/api/logout', self.logout), web.get('/api/settings', self.settings),
             web.post('/api/settings', self.save), web.get('/api/status', self.status),
             web.get('/api/history', self.history),
+            web.get('/api/history/image', self.history_image),
             web.post('/api/history/clear', self.clear_history),
             web.post('/api/tts-test', self.test_tts),
             web.post('/api/tts-stream-test', self.stream_test),
             web.get('/api/tts-stream-test/audio', self.stream_test_audio),
+            web.get('/api/flipper-screen', self.flipper_screen),
+            web.post('/api/flipper-screen/refresh', self.refresh_flipper_screen),
             web.post('/api/device-token', self.issue_token), web.post('/api/model-test', self.test_model),
             web.post('/api/connection-profile', self.connection_profile),
+            web.get('/api/singing', self.singing), web.post('/api/singing/config', self.singing_config),
+            web.post('/api/singing/download', self.singing_download),
+            web.get('/api/singing/download', self.singing_download_state),
         ])
         for route, filename in [('/', 'index.html'), ('/app.js', 'app.js'), ('/style.css', 'style.css')]:
             path = self.root / 'admin' / filename

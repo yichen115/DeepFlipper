@@ -5,6 +5,7 @@
 #include <furi.h>
 #include <furi_hal.h>
 #include <stdint.h>
+#include <string.h>
 #include <u8g2_glue.h>
 
 const CanvasFontParameters canvas_font_params[FontTotalNumber] = {
@@ -14,6 +15,48 @@ const CanvasFontParameters canvas_font_params[FontTotalNumber] = {
     [FontBigNumbers] = {.leading_default = 18, .leading_min = 16, .height = 15, .descender = 0},
     [FontBatteryPercent] = {.leading_default = 11, .leading_min = 9, .height = 6, .descender = 0},
 };
+
+// DeepFlipper text capture: 0 idle, 1 armed, 2 recording a frame, 3 frame complete.
+static struct {
+    volatile uint8_t state;
+    uint8_t count;
+    CanvasTextItem items[CANVAS_TEXT_ITEMS];
+} canvas_text;
+
+void canvas_text_capture_arm(void) {
+    FURI_CRITICAL_ENTER();
+    canvas_text.count = 0;
+    canvas_text.state = 1;
+    FURI_CRITICAL_EXIT();
+}
+
+void canvas_text_capture_cancel(void) {
+    canvas_text.state = 0;
+}
+
+bool canvas_text_capture_take(CanvasTextItem* items, size_t capacity, size_t* count) {
+    bool done = false;
+    FURI_CRITICAL_ENTER();
+    if(canvas_text.state == 3) {
+        size_t n = MIN((size_t)canvas_text.count, capacity);
+        memcpy(items, canvas_text.items, n * sizeof(CanvasTextItem));
+        *count = n;
+        canvas_text.state = 0;
+        done = true;
+    }
+    FURI_CRITICAL_EXIT();
+    return done;
+}
+
+static void canvas_text_record(Canvas* canvas, int32_t x, int32_t y, const char* str) {
+    if(canvas_text.state != 2 || canvas_text.count >= CANVAS_TEXT_ITEMS || !str[0]) return;
+    CanvasTextItem* item = &canvas_text.items[canvas_text.count];
+    item->x = (int16_t)x;
+    item->y = (int16_t)y;
+    item->color = u8g2_GetDrawColor(&canvas->fb);
+    strlcpy(item->text, str, sizeof(item->text));
+    canvas_text.count++;
+}
 
 Canvas* canvas_init(void) {
     Canvas* canvas = malloc(sizeof(Canvas));
@@ -66,11 +109,17 @@ void canvas_reset(Canvas* canvas) {
     canvas_set_color(canvas, ColorBlack);
     canvas_set_font(canvas, FontSecondary);
     canvas_set_font_direction(canvas, CanvasDirectionLeftToRight);
+
+    if(canvas_text.state == 1 || canvas_text.state == 2) {
+        canvas_text.count = 0;
+        canvas_text.state = 2;
+    }
 }
 
 void canvas_commit(Canvas* canvas) {
     furi_check(canvas);
     u8g2_SendBuffer(&canvas->fb);
+    if(canvas_text.state == 2) canvas_text.state = 3;
 
     // Iterate over callbacks
     canvas_lock(canvas);
@@ -188,6 +237,7 @@ void canvas_draw_str(Canvas* canvas, int32_t x, int32_t y, const char* str) {
     if(!str) return;
     x += canvas->offset_x;
     y += canvas->offset_y;
+    canvas_text_record(canvas, x, y, str);
     u8g2_DrawUTF8(&canvas->fb, x, y, str);
 }
 
@@ -231,6 +281,7 @@ void canvas_draw_str_aligned(
         break;
     }
 
+    canvas_text_record(canvas, x, y, str);
     u8g2_DrawUTF8(&canvas->fb, x, y, str);
 }
 
@@ -542,6 +593,21 @@ void canvas_draw_glyph(Canvas* canvas, int32_t x, int32_t y, uint16_t ch) {
     furi_check(canvas);
     x += canvas->offset_x;
     y += canvas->offset_y;
+    if(canvas_text.state == 2 && ch > 32 && ch < 127) {
+        // Keyboards draw one glyph at a time: join a row into one item per color.
+        uint8_t color = u8g2_GetDrawColor(&canvas->fb);
+        CanvasTextItem* last = canvas_text.count ? &canvas_text.items[canvas_text.count - 1] :
+                                                   NULL;
+        size_t len = last ? strlen(last->text) : 0;
+        if(last && last->y == y && last->color == color && x > last->x && len < CANVAS_TEXT_CHARS &&
+           last->text[0] != ' ') {
+            last->text[len] = (char)ch;
+            last->text[len + 1] = 0;
+        } else {
+            char one[2] = {(char)ch, 0};
+            canvas_text_record(canvas, x, y, one);
+        }
+    }
     u8g2_DrawGlyph(&canvas->fb, x, y, ch);
 }
 

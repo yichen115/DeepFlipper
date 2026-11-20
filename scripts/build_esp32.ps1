@@ -1,39 +1,56 @@
 param(
     [string]$EimPath = '',
-    [string]$Idf = 'v6.1'
+    [string]$Idf = 'v6.1',
+    [switch]$UseCurrentEnvironment
 )
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
-if(-not $EimPath) {
+if(-not $UseCurrentEnvironment -and -not $EimPath) {
     $workspaceEim = Join-Path (Split-Path -Parent $projectRoot) 'eim-cli.exe'
     if(Test-Path -LiteralPath $workspaceEim) { $EimPath = $workspaceEim }
     else {
-        $command = Get-Command eim -ErrorAction SilentlyContinue
+        $command = Get-Command eim, eim-cli -ErrorAction SilentlyContinue | Select-Object -First 1
         if($command) { $EimPath = $command.Source }
+        else {
+            # Usual EIM install locations (the project used D:\Espressif before).
+            foreach($candidate in @('D:\Espressif\eim-cli.exe', 'D:\Espressif\eim.exe',
+                                    'C:\Espressif\eim-cli.exe', 'C:\Espressif\eim.exe')) {
+                if(Test-Path -LiteralPath $candidate) { $EimPath = $candidate; break }
+            }
+        }
     }
 }
-if(-not $EimPath -or -not (Test-Path -LiteralPath $EimPath)) {
-    throw 'Pass -EimPath pointing to the installed EIM CLI executable.'
+if(-not $UseCurrentEnvironment -and (-not $EimPath -or -not (Test-Path -LiteralPath $EimPath))) {
+    throw ('EIM CLI not found. Pass it explicitly, e.g. .\scripts\build_esp32.ps1 -EimPath "D:\Espressif\eim-cli.exe", ' +
+           'or open an activated ESP-IDF v6.1 PowerShell and run .\scripts\build_esp32.ps1 -UseCurrentEnvironment')
 }
 $previousUtf8 = $env:PYTHONUTF8
 Push-Location (Join-Path $projectRoot 'firmware/esp32')
 try {
     $env:PYTHONUTF8 = '1'
     $nonce = [Guid]::NewGuid().ToString('N')
-    $entry = "python ../../scripts/esp32_build_entry.py --result ../../build/esp32-build-result.json --nonce $nonce"
-    & $EimPath --do-not-track true run $entry $Idf
-    if($LASTEXITCODE -ne 0) { throw 'ESP32 build failed in the selected EIM environment.' }
+    if($UseCurrentEnvironment) {
+        if(-not $env:IDF_PATH -or -not (Test-Path -LiteralPath (Join-Path $env:IDF_PATH 'tools/idf.py'))) {
+            throw 'Activate the ESP-IDF v6.1 environment before using -UseCurrentEnvironment.'
+        }
+        & python ../../scripts/esp32_build_entry.py --result ../../build/esp32-build-result.json --nonce $nonce
+        if($LASTEXITCODE -ne 0) { throw 'ESP32 build failed in the active ESP-IDF environment.' }
+    } else {
+        $entry = "python ../../scripts/esp32_build_entry.py --result ../../build/esp32-build-result.json --nonce $nonce"
+        & $EimPath --do-not-track true run $entry $Idf
+        if($LASTEXITCODE -ne 0) { throw 'ESP32 build failed in the selected EIM environment.' }
+    }
     $resultPath = Join-Path $projectRoot 'build/esp32-build-result.json'
-    if(-not (Test-Path -LiteralPath $resultPath)) { throw 'EIM did not produce a build result.' }
+    if(-not (Test-Path -LiteralPath $resultPath)) { throw 'The build did not produce a result record.' }
     $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
     if($result.nonce -ne $nonce -or $result.state -ne 'complete' -or $result.exit_code -ne 0) {
-        throw 'The build inside EIM failed; refusing to export stale firmware.'
+        throw 'The selected build failed; refusing to export stale firmware.'
     }
     $mergedHash = (Get-FileHash -LiteralPath 'build/merged-binary.bin' -Algorithm SHA256).Hash
     if($mergedHash.ToLowerInvariant() -ne $result.merged_sha256) { throw 'Build result does not match firmware.' }
     $release = Join-Path $projectRoot 'build/release/esp32'
     New-Item -ItemType Directory -Force $release | Out-Null
-    foreach($name in @('xiaozhi.bin','xiaozhi.elf','merged-binary.bin','flasher_args.json')) {
+    foreach($name in @('deepflipper.bin','deepflipper.elf','merged-binary.bin','flasher_args.json')) {
         $file = Join-Path 'build' $name
         if(-not (Test-Path -LiteralPath $file)) { throw "Expected build output missing: $file" }
         Copy-Item -LiteralPath $file -Destination $release
@@ -57,7 +74,7 @@ try {
 DeepFlipper ESP32-S3 N16R8 flashing
 
 Existing DeepFlipper installation (same partition layout, initial ota_0 slot):
-  File: xiaozhi.bin
+  File: deepflipper.bin
   Address: $appAddress
   Do NOT erase the whole chip. This preserves Wi-Fi, login password and identity.
   If OTA boot selection changed/is unknown, use the full image and reconfigure.

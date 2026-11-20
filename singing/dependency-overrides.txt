@@ -1,0 +1,6 @@
+# infer-rvc-python's pyworld 0.3.4 pin predates NumPy 2; use the compatible Windows wheel.
+pyworld==0.3.5
+# 0.0.20 forces librosa 0.9.1, conflicting with audio-separator's >=0.10.
+# RMVPE is the default; the newer CREPE also supports current librosa.
+torchcrepe==0.0.24
+librosa==0.11.0

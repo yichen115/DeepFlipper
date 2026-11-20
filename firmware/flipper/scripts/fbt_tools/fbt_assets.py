@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 
 from ansi.color import fg
@@ -101,13 +102,23 @@ def _proto_ver_generator(target, source, env):
         except (subprocess.CalledProcessError, EnvironmentError):
             return None
 
-    fetch()
-    git_describe = describe()
-    if not git_describe:
-        fetch(unshallow=True)
+    if os.path.exists(os.path.join(src_dir, ".git")):
+        fetch()
         git_describe = describe()
+        if not git_describe:
+            fetch(unshallow=True)
+            git_describe = describe()
+    else:
+        # Dependencies restored from pinned source archives have no nested Git
+        # metadata. Git here would find the containing project's unrelated tags.
+        changelog = os.path.join(src_dir, "Changelog")
+        if not os.path.isfile(changelog):
+            raise StopError("Missing protobuf Changelog; restore the pinned dependency")
+        with open(changelog, encoding="utf-8") as file:
+            version = re.search(r"^## \[(\d+\.\d+)\]", file.read(), re.MULTILINE)
+        git_describe = version.group(1) if version else None
 
-    if not git_describe:
+    if not git_describe or not re.fullmatch(r"\d+\.\d+", git_describe):
         raise StopError("Failed to process git tags for protobuf versioning")
 
     git_major, git_minor = git_describe.split(".")

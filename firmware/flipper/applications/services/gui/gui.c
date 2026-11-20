@@ -71,10 +71,13 @@ static bool gui_redraw_fs(Gui* gui) {
 static void gui_redraw_status_bar(Gui* gui, bool need_attention) {
 #ifdef SRV_DEEPFLIPPER
     if(deepflipper_rendered()) {
-        // The mascot draws its own compact status column, including while locked.
+        // The home room shows time/battery/lock itself; keep only the background hint.
         if(need_attention) {
             canvas_frame_set(gui->canvas, 0, 0, GUI_DISPLAY_WIDTH, GUI_DISPLAY_HEIGHT);
-            canvas_draw_icon(gui->canvas, 90, 45, &I_Hidden_window_9x8);
+            canvas_set_color(gui->canvas, ColorWhite);
+            canvas_draw_box(gui->canvas, 0, 0, 11, 10);
+            canvas_set_color(gui->canvas, ColorBlack);
+            canvas_draw_icon(gui->canvas, 1, 1, &I_Hidden_window_9x8);
         }
         return;
     }

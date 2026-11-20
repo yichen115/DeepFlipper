@@ -116,6 +116,27 @@ void canvas_remove_framebuffer_callback(
     CanvasCommitCallback callback,
     void* context);
 
+/* DeepFlipper: on-demand capture of the text drawn in one complete frame, so the
+ * assistant can read menus. Off unless armed; costs one pointer check per string. */
+#define CANVAS_TEXT_ITEMS 24
+#define CANVAS_TEXT_CHARS 27
+
+typedef struct {
+    int16_t x; /**< final left x after alignment */
+    int16_t y; /**< baseline y */
+    uint8_t color; /**< u8g2 draw color: 1 black, 0 white (inverted/highlighted), 2 xor */
+    char text[CANVAS_TEXT_CHARS + 1];
+} CanvasTextItem;
+
+/** Arm capture of the next frame drawn between canvas_reset() and canvas_commit(). */
+void canvas_text_capture_arm(void);
+
+/** Copy the captured frame once complete. Returns false while not yet captured. */
+bool canvas_text_capture_take(CanvasTextItem* items, size_t capacity, size_t* count);
+
+/** Stop a pending capture. */
+void canvas_text_capture_cancel(void);
+
 #ifdef __cplusplus
 }
 #endif

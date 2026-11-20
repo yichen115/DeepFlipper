@@ -28,7 +28,7 @@ class AdminTests(unittest.IsolatedAsyncioTestCase):
         (self.root / 'admin').mkdir()
         (self.root / 'admin/index.html').write_text('<html>Admin</html>', encoding='utf-8')
         defaults = {'server': {'websocket': 'ws://192.168.1.2:8000/xiaozhi/v1/'},
-                    'selected_module': {'LLM': 'DeepSeekLLM', 'ASR': 'FunASR', 'TTS': 'EdgeTTS'},
+                    'selected_module': {'LLM': 'DeepSeekLLM', 'ASR': 'SherpaASR', 'TTS': 'EdgeTTS'},
                     'LLM': {'DeepSeekLLM': {'type': 'openai', 'base_url': 'https://api.example.test/v1',
                                            'model_name': 'model-a', 'api_key': 'secret-old'}},
                     'TTS': {'EdgeTTS': {'voice': 'zh-CN-XiaoxiaoNeural'}}}
@@ -376,6 +376,70 @@ class AdminTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((self.root / 'data/.config.yaml').read_bytes(), original)
         finally:
             await provider_server.close()
+
+    async def test_singing_tab_proxies_worker_paths_library_and_link_downloads(self):
+        import os
+        import shutil
+        sys.path.insert(0, str(ROOT / 'singing'))
+        import worker as worker_mod
+
+        class Pipe:
+            def gpu_info(self): return {'cuda': True, 'name': 'Fake GPU'}
+            def model_status(self): return {'model_ready': True}
+            def model_id(self): return 'm'
+            def render(self, *args): raise RuntimeError('not used')
+
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        os.makedirs(os.path.join(base, 'songs_in'))
+        Path(base, 'songs_in', '七里香.mp3').write_bytes(b'x' * 300)
+        calls = []
+        worker = worker_mod.Worker({'songs_dirs': ['songs_in'], 'cache_dir': 'cache', 'rvc': {}, 'mix': {},
+                                    'separator': {}}, base, Pipe(),
+                                   downloader=lambda *a: calls.append(a) or os.path.join(base, 'x.m4a'))
+        worker_server = TestServer(worker_mod.create_app(worker, 'sing-token'))
+        await worker_server.start_server()
+        self.addAsyncCleanup(worker_server.close)
+        custom = {'prompt': 'custom', 'singing': {'worker_url': str(worker_server.make_url('')).rstrip('/'),
+                                                  'token': 'sing-token'}}
+        (self.root / 'data/.config.yaml').write_text(yaml.safe_dump(custom), encoding='utf-8')
+        self.assertEqual((await self.client.get('/api/singing')).status, 401)
+        headers = await self.login()
+        data = await (await self.client.get('/api/singing')).json()
+        self.assertTrue(data['online'])
+        self.assertEqual(data['health']['gpu']['name'], 'Fake GPU')
+        self.assertEqual(data['config']['songs_dirs'], [os.path.join(base, 'songs_in')])
+        self.assertEqual([s['title'] for s in data['songs']['songs']], ['七里香'])
+        # 改路径：不存在的目录由 worker 拒绝，错误原样显示
+        response = await self.client.post('/api/singing/config', json={
+            'songs_dirs': 'D:/没有这个目录', 'download_dir': '', 'cache_dir': 'cache'}, headers=headers)
+        self.assertEqual(response.status, 400)
+        self.assertIn('目录不存在', (await response.json())['error'])
+        os.makedirs(os.path.join(base, 'music'))
+        response = await self.client.post('/api/singing/config', json={
+            'songs_dirs': f"{os.path.join(base, 'music')}\nsongs_in", 'download_dir': '', 'cache_dir': 'cache2'},
+            headers=headers)
+        self.assertEqual(response.status, 200)
+        self.assertEqual((await response.json())['cache_dir'], os.path.join(base, 'cache2'))
+        self.assertTrue(Path(base, 'config.local.yaml').is_file())
+        # 链接：只接受 http(s)，worker 没装 yt-dlp 时说清楚
+        response = await self.client.post('/api/singing/download', json={'url': 'file:///etc/passwd'},
+                                          headers=headers)
+        self.assertEqual(response.status, 400)
+        worker_mod.ytdlp_available, old = (lambda: False), worker_mod.ytdlp_available
+        try:
+            response = await self.client.post('/api/singing/download', json={'url': 'https://b23.tv/abc'},
+                                              headers=headers)
+            self.assertEqual(response.status, 503)
+            self.assertIn('yt-dlp', (await response.json())['error'])
+        finally:
+            worker_mod.ytdlp_available = old
+        # 唱歌服务没开
+        custom['singing']['worker_url'] = 'http://127.0.0.1:9'
+        (self.root / 'data/.config.yaml').write_text(yaml.safe_dump(custom), encoding='utf-8')
+        data = await (await self.client.get('/api/singing')).json()
+        self.assertFalse(data['online'])
+        self.assertIn('连不上唱歌服务', data['error'])
 
 
 class LocalOnlyConfigTests(unittest.TestCase):

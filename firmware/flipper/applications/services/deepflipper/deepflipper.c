@@ -1,8 +1,10 @@
 #include "deepflipper.h"
 #include "deepflipper_i.h"
+#include "deepflipper_screen.h"
 #include "deepflipper_sprite.h"
 
 #include <furi_hal.h>
+#include <furi_hal_power_i.h>
 #include <expansion/expansion.h>
 #include <power/power_service/power.h>
 #include <mjs/common/frozen/frozen.h>
@@ -28,6 +30,7 @@ typedef struct {
     uint32_t command_id;
     uint32_t command_deadline;
     bool uart_suspended;
+    bool settings_foreground;
     char command[512];
     bool nfc_requested;
     bool nfc_running;
@@ -185,6 +188,7 @@ static int32_t worker(void* context) {
             furi_record_close(RECORD_POWER);
             lock();
             service->snapshot.battery = info.charge;
+            service->snapshot.charging = info.is_charging;
             unlock();
             power_tick = furi_get_tick();
         }
@@ -239,18 +243,23 @@ void deepflipper_set_enabled(bool enabled) {
     service->nfc_cancel = true;
     service->command_id = 0;
     memset(service->command, 0, sizeof(service->command));
-    service->uart_suspended = enabled && service->snapshot.foreground;
-    bool start_uart = enabled && !service->snapshot.foreground;
+    bool start_uart = enabled && (!service->snapshot.foreground || service->settings_foreground);
+    service->uart_suspended = enabled && !start_uart;
     unlock();
     Expansion* expansion = furi_record_open(RECORD_EXPANSION);
     if(enabled) {
+        // The module runs from pin 1. Apps that probe their own 5 V accessories (Sub-GHz
+        // external CC1101, iButton, ...) switch the rail off afterwards; hold it on.
+        furi_hal_power_otg_hold(true);
         Power* power = furi_record_open(RECORD_POWER);
         power_enable_otg(power, true);
         furi_record_close(RECORD_POWER);
         if(start_uart) expansion_set_listen_serial(expansion, FuriHalSerialIdUsart);
     } else {
         expansion_disable(expansion);
-        // Do not disable shared 5 V: the module has its own physical switch.
+        // Do not disable shared 5 V: the module has its own physical switch. Apps may
+        // switch the rail again once the assistant no longer needs it.
+        furi_hal_power_otg_hold(false);
     }
     furi_record_close(RECORD_EXPANSION);
     furi_mutex_release(service->link_mutex);
@@ -305,8 +314,15 @@ bool deepflipper_prepare_app_start(void) {
     return false;
 }
 
+void deepflipper_set_settings_foreground(void) {
+    lock();
+    service->settings_foreground = true;
+    unlock();
+}
+
 void deepflipper_app_finished(void) {
     lock();
+    service->settings_foreground = false;
     service->snapshot.foreground = false;
     unlock();
     deepflipper_worker_start();
@@ -343,6 +359,7 @@ void deepflipper_disconnected(uint32_t session) {
         memset(service->command, 0, sizeof(service->command));
     }
     unlock();
+    deepflipper_screen_reset();
 }
 
 void deepflipper_request(const char* json, size_t size, char* result, size_t capacity) {
@@ -389,7 +406,8 @@ void deepflipper_request(const char* json, size_t size, char* result, size_t cap
             if(state >= DeepFlipperOffline && state <= DeepFlipperError && !service->nfc_running)
                 service->snapshot.state = state;
             if(mouth >= 0 && mouth <= 2) service->snapshot.mouth = mouth;
-            if(emotion >= 0 && emotion < 12) service->snapshot.emotion = emotion;
+            // 0-11 expressions, 12 singing (see deepflipper_sprite.c DF_ANIMATION_SING)
+            if(emotion >= 0 && emotion <= 12) service->snapshot.emotion = emotion;
             snprintf(result, capacity, "{\"ok\":true}");
         } else if(strcmp(op, "poll") == 0) {
             snprintf(
@@ -488,6 +506,11 @@ void deepflipper_request(const char* json, size_t size, char* result, size_t cap
                     service->job_state,
                     service->protocol);
             }
+        } else if(strcmp(op, "screen") == 0 || strcmp(op, "screen.page") == 0) {
+            // Waits for a GUI redraw; the home renderer reads our snapshot under this lock.
+            unlock();
+            deepflipper_screen_request(op, json, size, result, capacity);
+            lock();
         } else {
             fail(result, capacity, "unsupported");
         }

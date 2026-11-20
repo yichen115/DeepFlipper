@@ -205,8 +205,9 @@ bool desktop_scene_main_on_event(void* context, SceneManagerEvent event) {
         case DesktopAnimationEventInteractAnimation:
             if(!animation_manager_interact_process(desktop->animation_manager)) {
                 if(!desktop->settings.dummy_mode) {
-                    desktop_scene_main_open_app_or_profile(
-                        desktop, &desktop->settings.favorite_apps[FavoriteAppRightShort]);
+                    // Keep warning/level-up acknowledgements above this shortcut.
+                    loader_start_detached_with_gui_error(
+                        desktop->loader, EXT_PATH("apps/Games/whale_pet.fap"), NULL);
                 } else {
                     desktop_scene_main_open_app_or_profile(
                         desktop, &desktop->settings.dummy_apps[DummyAppRightShort]);

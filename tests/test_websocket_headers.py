@@ -21,15 +21,12 @@ class QuietLogger:
 
 def load_server():
     stubs = {}
-    for name in ('websockets', 'config.logger', 'core.connection', 'config.config_loader',
-                 'core.utils.modules_initialize', 'core.utils.util'):
+    for name in ('websockets', 'config.logger', 'core.connection',
+                 'core.utils.modules_initialize'):
         stubs[name] = types.ModuleType(name)
     stubs['websockets'].ServerConnection = object
     stubs['config.logger'].setup_logging = lambda *args: QuietLogger()
-    stubs['config.config_loader'].reload_local_config = None
     stubs['core.utils.modules_initialize'].initialize_modules = lambda *args: {}
-    stubs['core.utils.util'].check_vad_update = None
-    stubs['core.utils.util'].check_asr_update = None
 
     class Connection:
         def __init__(self, *args): pass

@@ -3,6 +3,21 @@
 #include <string>
 
 namespace dfcompanion {
+// Brief UART re-discovery should not require renegotiating the voice socket.
+class VoiceLinkGrace {
+    static constexpr int64_t kGraceMs = 5000;
+    int64_t deadline_ms_ = 0;
+
+public:
+    void Lost(int64_t now) { deadline_ms_ = now + kGraceMs; }
+    void Recovered() { deadline_ms_ = 0; }
+    bool ShouldSuspend(int64_t now) {
+        if (!deadline_ms_ || now < deadline_ms_)
+            return false;
+        deadline_ms_ = 0;
+        return true;
+    }
+};
 // Keep interactive updates responsive, without repeatedly sending unchanged UI
 // or the full module profile. The transport heartbeat is scheduled separately.
 class Updates {

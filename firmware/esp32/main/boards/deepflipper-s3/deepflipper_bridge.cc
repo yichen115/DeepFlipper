@@ -107,6 +107,7 @@ void DeepFlipperBridge::FailLink(const char* reason) {
     rpc_transport_active_ = false;
     session_ = 0;
     link_stage_ = dfexpansion::LinkStage::LinkLost;
+    RetainApp("", 0);
 }
 
 bool DeepFlipperBridge::ReadFrame(int timeout_ms) {
@@ -213,8 +214,10 @@ void DeepFlipperBridge::Dispatch(const std::vector<uint8_t>& f) {
                     running = field.number == 1;
             if (reader.Done()) {
                 rpc_app_running_ = running;
-                if (!running)
+                if (!running) {
                     rpc_app_name_.clear();
+                    RetainApp("", 0);
+                }
             }
         } else if (native_id_ && message.id >= native_first_id_ && message.id <= native_id_) {
             if (++native_reply_.frames > 2048 || (native_sink_ && !native_sink_(message))) {
@@ -251,6 +254,7 @@ bool DeepFlipperBridge::Connect() {
     native_sink_ = {};
     rpc_app_running_ = false;
     rpc_app_name_.clear();
+    RetainApp("", 0);
     // Silence the old session long enough for the peer's 250 ms Expansion
     // watchdog to close it before driving the next discovery pulse.
     if (link_rate_.Active())
@@ -339,7 +343,7 @@ bool DeepFlipperBridge::Connect() {
     return connected;
 }
 
-std::string DeepFlipperBridge::Call(const std::string& request) {
+std::string DeepFlipperBridge::Call(const std::string& request, int timeout_ms) {
     if (transport_failed_ || !rpc_transport_active_)
         return "{\"ok\":false,\"code\":\"link_lost\"}";
     auto object = cJSON_Parse(request.c_str());
@@ -361,7 +365,7 @@ std::string DeepFlipperBridge::Call(const std::string& request) {
         FailLink("data_ack_timeout_or_rejected");
         return "{\"ok\":false,\"code\":\"link_lost\"}";
     }
-    int64_t deadline = esp_timer_get_time() + 500000;
+    int64_t deadline = esp_timer_get_time() + timeout_ms * 1000LL;
     while (response_id_ != id && !transport_failed_ && esp_timer_get_time() < deadline)
         ReadFrame(10);
     if (response_id_ != id) {
@@ -431,7 +435,9 @@ DeepFlipperBridge::NativeReply DeepFlipperBridge::Native(
         native_reply_.error = "link_lost";
         FailLink("native_ack_timeout");
     } else {
-        const int64_t deadline = esp_timer_get_time() + (cleanup ? 2000000 : 5000000);
+        // Application start includes SD loading and its startup screen.
+        const int64_t reply_timeout_us = cleanup ? 2000000 : (tag == 16 ? 10000000 : 5000000);
+        const int64_t deadline = esp_timer_get_time() + reply_timeout_us;
         while (!native_reply_.done && session_ && esp_timer_get_time() < deadline) {
             if (!cleanup &&
                 (NativeCancelled() || esp_timer_get_time() / 1000 >= native_deadline_ms_)) {
@@ -455,7 +461,8 @@ DeepFlipperBridge::NativeReply DeepFlipperBridge::Native(
 
 std::string DeepFlipperBridge::ExecuteNative(const JobEntry& job) {
     dfnative::Actions actions(*this, job.deadline_ms);
-    if (job.op == "native.capture") {
+    if (job.op == "native.capture" || job.op == "native.app.describe" ||
+        job.op == "native.app.call") {
         auto args = cJSON_Parse(job.args.c_str());
         if (!cJSON_IsObject(args)) {
             cJSON_Delete(args);
@@ -525,6 +532,8 @@ void DeepFlipperBridge::SetEmotion(const char* name) {
         value = 10;
     else if (n == "thinking" || n == "confused")
         value = 2;
+    else if (n == "singing" || n == "practicing")
+        value = 12;  // Flipper home: microphone + notes (DF_ANIMATION_SING)
     else if (n == "cancel" || n == "cloud_off")
         state_ = 8;
     emotion_ = value;
@@ -567,13 +576,17 @@ int DeepFlipperBridge::Submit(const std::string& op, int timeout_ms, const std::
         return -2;
     if (args.size() > 1024)
         return -3;
+    if (op == "tool.nfc.scan" && retained_active_)
+        return 0;
     const bool mutating = native && op != "native.files" && op != "native.apps" &&
-                          op != "native.system.info" && op != "native.app.state";
+                          op != "native.app.catalog" && op != "native.system.info" &&
+                          op != "native.app.state" && op != "native.screen";
     for (const auto& existing : jobs_) {
         const bool existing_mutating =
             existing.op.rfind("native.", 0) == 0 && existing.op != "native.files" &&
-            existing.op != "native.apps" && existing.op != "native.system.info" &&
-            existing.op != "native.app.state";
+            existing.op != "native.apps" && existing.op != "native.app.catalog" &&
+            existing.op != "native.system.info" && existing.op != "native.app.state" &&
+            existing.op != "native.screen";
         if (existing.pending && ((mutating && existing.op == "tool.nfc.scan") ||
                                  (op == "tool.nfc.scan" && existing_mutating)))
             return 0;
@@ -694,7 +707,7 @@ void DeepFlipperBridge::UpdateLed() {
     int r = 0, g = 0, b = 0;
     double breath = 0.15 + 0.85 * (1 - std::cos(now / 1600000.0 * 6.283185)) / 2;
     int level = std::clamp(brightness_.load(), 0, 100) * 10;
-    if (tool_active_)
+    if (tool_active_ || !retained_app_.empty())
         state = 7;
     switch (state) {
         case 0:
@@ -746,6 +759,7 @@ void DeepFlipperBridge::Run() {
     int64_t last_report = 0;
     int64_t last_diagnostic_save = -600000;
     dfcompanion::Updates updates;
+    dfcompanion::VoiceLinkGrace voice_grace;
     while (true) {
         if (!session_) {
             if (linked_.exchange(false)) {
@@ -757,7 +771,12 @@ void DeepFlipperBridge::Run() {
                     diagnostic.SetString("disconnect", last_disconnect_.load());
                     last_diagnostic_save = now;
                 }
-                Application::GetInstance().SuspendVoiceSession();
+                voice_grace.Lost(NowMs());
+            }
+            if (voice_grace.ShouldSuspend(NowMs())) {
+                Application::GetInstance().SuspendVoiceSession({}, [this]() {
+                    return !linked_.load();
+                });
             }
             {
                 std::lock_guard<std::mutex> guard(mutex_);
@@ -775,8 +794,18 @@ void DeepFlipperBridge::Run() {
                 continue;
             }
             linked_ = true;
+            voice_grace.Recovered();
             updates = dfcompanion::Updates{};
             last_report = 0;
+        }
+        if (!retained_app_.empty() && NowMs() >= retained_deadline_ms_) {
+            native_deadline_ms_ = NowMs() + 5000;
+            dfnative::Actions actions(*this, native_deadline_ms_);
+            const auto expired = actions.ExpireRetained();
+            native_deadline_ms_ = 0;
+            ESP_LOGI(kLogTag, "Retained app lease cleanup: %s", expired.c_str());
+            if (!session_)
+                continue;
         }
         if (esp_timer_get_time() / 1000 - last_report >= 1000) {
             last_report = esp_timer_get_time() / 1000;
@@ -799,6 +828,8 @@ void DeepFlipperBridge::Run() {
         if (!result.empty())
             Call(result);
         int s = DeviceSetup::Get().VisualState(configured_, state_);
+        if (!retained_app_.empty())
+            s = 7;
         uint32_t audio_tick = audio_tick_ms_;
         if (!muted_ && audio_tick &&
             static_cast<uint32_t>(esp_timer_get_time() / 1000) - audio_tick < 150)
@@ -864,6 +895,11 @@ void DeepFlipperBridge::Run() {
                 cJSON_AddBoolToObject(parsed, "native_rpc_available", native_supported_);
                 cJSON_AddNumberToObject(parsed, "uart_baud", link_rate_.Baud());
                 cJSON_AddBoolToObject(parsed, "uart_fallback", link_rate_.Fallback());
+                cJSON_AddStringToObject(parsed, "retained_app", retained_app_.c_str());
+                cJSON_AddNumberToObject(
+                    parsed, "lease_remaining_ms",
+                    retained_app_.empty() ? 0
+                                          : std::max<int64_t>(0, retained_deadline_ms_ - NowMs()));
                 reply = Serialize(parsed);
             }
             auto remote = dfcompanion::UInt32(parsed, "job");

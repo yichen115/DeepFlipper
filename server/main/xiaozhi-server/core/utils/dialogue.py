@@ -3,6 +3,35 @@ import re
 from typing import List, Dict
 from datetime import datetime
 
+# 旧截图在发给模型时替换成的占位文字（节省 token；只保留最近一张图）
+OLD_IMAGE_PLACEHOLDER = "[较早的屏幕截图已省略]"
+
+
+def has_image(content) -> bool:
+    """content 为多模态列表且含图片时返回 True"""
+    return isinstance(content, list) and any(
+        isinstance(part, dict) and part.get("type") in ("image_url", "image")
+        for part in content
+    )
+
+
+def content_text(content, image_placeholder: str = OLD_IMAGE_PLACEHOLDER):
+    """把消息 content（字符串或多模态列表）转成纯文本；图片换成占位文字"""
+    if content is None or isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict):
+                if part.get("type") == "text":
+                    parts.append(str(part.get("text") or ""))
+                elif part.get("type") in ("image_url", "image") and image_placeholder:
+                    parts.append(image_placeholder)
+        return "\n".join(part for part in parts if part)
+    return str(content)
+
 
 class Message:
     def __init__(
@@ -34,7 +63,13 @@ class Dialogue:
         if self.observer:
             self.observer(message)
 
-    def getMessages(self, m, dialogue):
+    def getMessages(self, m, dialogue, keep_image=False):
+        content = m.content
+        # 多模态列表：只有被选中保留的最新截图才原样发送；助手消息不能带图片
+        if isinstance(content, list) and not (
+            keep_image and m.role != "assistant" and has_image(content)
+        ):
+            content = content_text(content)
         if m.tool_calls is not None:
             dialogue.append({"role": m.role, "tool_calls": m.tool_calls})
         elif m.role == "tool":
@@ -44,11 +79,11 @@ class Dialogue:
                     "tool_call_id": (
                         str(uuid.uuid4()) if m.tool_call_id is None else m.tool_call_id
                     ),
-                    "content": m.content,
+                    "content": content,
                 }
             )
         else:
-            dialogue.append({"role": m.role, "content": m.content})
+            dialogue.append({"role": m.role, "content": content})
 
     def get_llm_dialogue(self) -> List[Dict[str, str]]:
         # 直接调用get_llm_dialogue_with_memory，传入None作为memory_str
@@ -96,8 +131,9 @@ class Dialogue:
 
     def get_llm_dialogue_with_memory(
             self, memory_str: str = None, voiceprint_config: dict = None,
-            current_speaker: str = None,
+            current_speaker: str = None, max_images: int = 1,
     ) -> List[Dict[str, str]]:
+        """max_images：最多保留几张（最新的）截图；更早的图片换成占位文字，0 表示全部去掉"""
         # 构建对话
         dialogue = []
 
@@ -107,7 +143,7 @@ class Dialogue:
         )
 
         if system_message:
-            full_prompt = system_message.content
+            full_prompt = content_text(system_message.content) or ""
 
             # 替换时间占位符
             full_prompt = full_prompt.replace(
@@ -154,13 +190,18 @@ class Dialogue:
         non_system_messages = [m for m in self.dialogue if m.role != "system"]
         fewshot_messages = [m for m in non_system_messages if m.is_temporary]
         complete_fewshot = self._ensure_tool_calls_complete(fewshot_messages)
-        for m in complete_fewshot:
-            self.getMessages(m, dialogue)
 
         # 第三段：实际对话历史（不含 few-shot）
         actual_messages = [m for m in non_system_messages if not m.is_temporary]
         complete_actual = self._ensure_tool_calls_complete(actual_messages)
-        for m in complete_actual:
-            self.getMessages(m, dialogue)
+
+        # 只保留最近 max_images 条带图消息的图片
+        ordered = complete_fewshot + complete_actual
+        with_images = [
+            id(m) for m in ordered if m.role != "assistant" and has_image(m.content)
+        ]
+        keep = set(with_images[-max_images:]) if max_images and max_images > 0 else set()
+        for m in ordered:
+            self.getMessages(m, dialogue, keep_image=id(m) in keep)
 
         return dialogue

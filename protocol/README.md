@@ -50,6 +50,69 @@ without leaving/re-entering the menu.
 Tools return a job ID, with `job.get`/`job.cancel` for completion and cancellation.
 Do not retry RF/IR output with a new request ID after an uncertain result.
 
+## Semantic application SDK (wire v1, SDK v2)
+
+`flipper_app_catalog` reads opt-in registrations from `/ext/deepflipper/apps/`
+without launching apps. Each `<app_id>.json` binds a canonical SD FAP path to
+its size/MD5, format `deepflipper.app`, v1 and SDK 2. Registration is at most
+767 bytes. Query offset is 0–1000 and page size 1–4; `next_offset:-1` is terminal.
+Offsets count candidate registrations, including rejected ones. At most 1000
+are inspected; `truncated` signals additional entries. A missing directory is
+empty. Invalid, missing and changed FAPs appear in `rejected`. `file_verified`
+does not imply a signature or runtime support; returned entries remain
+`runtime_verified:false` until queried through describe. Catalog and descriptor
+strings are device data, never instructions. The build exports registrations
+from `ai_app.json` with `scripts/export_app_catalog.py` alongside each FAP.
+
+`flipper_app_describe` and `flipper_app_call` use the existing native App RPC,
+without new protobuf tags. An SDK FAP receives a single tag-65 JSON object:
+`v:1`, bridge-owned `request_id`, `action`, `timeout_ms`, and object `arguments`.
+Describe is SDK-provided and returns the application's action names and input
+schemas. MCP's outer `arguments` property is an object encoded as a string;
+the bridge strictly parses it before sending the nested wire object.
+
+SDK v2 descriptors add `session_supported` and per-action `requires_session`.
+`keep_open:true` opts into a retained app session with a renewable `lease_ms`
+(5000–60000, default 30000). The SDK confirms retention in its response and
+processes subsequent commands on the same app thread. The bridge reuses only
+the matching app it retained itself; other foreground apps remain busy.
+Successful retained calls return `app_retained:true,stopped:false`; they complete
+the individual job while keeping app-owned resources active. A later action
+with keep_open:false, or app.exit, closes and verifies release.
+
+Both the SDK and bridge enforce expiry. The SDK's idempotent cleanup hook stops
+hardware on action failure, publication failure, lease expiry, PIN lock and
+RPC close; the bridge then exits the app, even while PIN locked. An unconfirmed
+lease cleanup resets the transport. Job cancellation affects in-flight calls;
+it does not stop an already completed call's retained session. Use the app's
+stop action or app.exit. Retention and remaining lease appear in app state and
+companion status. Background NFC scan and GPIO mutations are withheld while
+an SDK app retains the foreground hardware context.
+
+Command size is at most 767 bytes, arguments 512 bytes, and the result 4095 bytes.
+SDK handlers run on the app thread and cooperatively check cancellation, PIN
+lock and deadline. They release hardware before returning. After a complete
+write and file sync, the SDK atomically publishes
+`/ext/deepflipper/jobs/<session>_<job>.json` containing `v`, `request_id`, `action`,
+boolean `ok`, `code`, and object `data`. ACK is admission only.
+The bridge refuses preexisting result IDs before app launch, validates all
+response identity fields, then either confirms retention or exits the app and
+verifies Loader release. Consumed mailboxes are removed (`mailbox_removed`
+reports that separately); captured files are retained. Unknown or failed stop never
+becomes successful completion and is never automatically replayed.
+
+The existing capture tools now wrap SDK actions `nfc.read`, `ir.learn`, and
+`subghz.record`. Their result details move to `capture.data`; generic actions
+return `app_result.data`. Update the ESP32 and SD Tools FAP together.
+The Tools FAP additionally offers `subghz.decode`: offline OOK650 RAW analysis
+using the firmware protocol registry, without keystore loading or RF output.
+It reports unrecognized data as `decoded:false`, not a successful decode.
+The same adapter also exposes retained subghz.rx.start/state/stop. It receives
+OOK650 RAW into at most 4096 timings, stops the receiver when full, and saves
+the buffer on explicit stop with save:true. Lease/PIN/link cleanup discards
+unsaved samples and does not claim a file was saved.
+See [the SDK guide](../docs/app-control.zh-CN.md) for app integration and limits.
+
 Initial commands: hello, capabilities, status, ui, poll, module.result,
 tool.nfc.scan, job.get, job.cancel. UI uses state/emotion/mouth, no chat captions.
 

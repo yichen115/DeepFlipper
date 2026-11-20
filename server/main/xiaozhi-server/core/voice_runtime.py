@@ -55,8 +55,8 @@ class VoiceRuntime:
                     from core.providers.tts.local_melo import TTSProvider
                     local_config = config.get('TTS', {}).get('LocalTTS', {})
                     await asyncio.to_thread(TTSProvider, local_config, True)
-                if asr.get('type') == 'fun_local':
-                    model = Path(get_project_dir()) / asr.get('model_dir', 'models/SenseVoiceSmall') / 'model.pt'
+                if asr.get('type') == 'sherpa_onnx_local':
+                    model = Path(get_project_dir()) / asr.get('model_dir', '') / 'model.int8.onnx'
                     if not model.is_file():
                         raise FileNotFoundError('Local ASR model missing')
                 if vad.get('type') == 'silero':

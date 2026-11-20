@@ -17,7 +17,7 @@
     </section>
     <section id="console" hidden>
       <div class="intro"><div><p class="eyebrow">你的声音，你的伙伴</p><h1>设置好模型，开始对话。</h1><p>所有设置由当前 Python 服务管理，无需额外后台。</p></div><button id="logout" class="quiet" type="button">退出登录</button></div>
-      <nav aria-label="设置分类"><button class="tab active" data-panel="model-panel" type="button">模型设置</button><button class="tab" data-panel="prompt-panel" type="button">提示词与工具</button><button class="tab" data-panel="device-panel" type="button">设备连接</button><button class="tab" data-panel="history-panel" type="button">对话记录</button></nav>
+      <nav aria-label="设置分类"><button class="tab active" data-panel="model-panel" type="button">模型设置</button><button class="tab" data-panel="prompt-panel" type="button">提示词与工具</button><button class="tab" data-panel="device-panel" type="button">设备连接</button><button class="tab" data-panel="singing-panel" type="button">唱歌</button><button class="tab" data-panel="history-panel" type="button">对话记录</button></nav>
       <section id="model-panel" class="panel">
         <div class="grid">
           <article class="card"><h2>对话模型</h2><p>支持 DeepSeek 和 OpenAI 兼容接口。选择支持工具调用的模型，才能操作 Flipper。</p>
@@ -27,21 +27,42 @@
             <label class="check"><input id="clear-key" type="checkbox">清除已保存的 API Key</label>
             <button id="test-model" class="secondary" type="button">测试接口与工具调用</button><small class="note">测试会向模型发送一次简短请求，不执行任何硬件操作。</small>
           </article>
-          <aside class="card"><h2>语音链路</h2><dl><dt>语音识别</dt><dd id="asr-name">—</dd><dt>语音合成</dt><dd id="tts-name">—</dd></dl><label for="tts-provider">语音合成方式</label><select id="tts-provider"><option value="LocalTTS">本地 MeloTTS（CPU，无需联网）</option><option value="EdgeTTS">EdgeTTS（微软在线服务）</option></select><p id="tts-hint">本地模型首次需要单独下载，之后离线合成。DeepSeek 生成回答仍需要模型 API。</p><label for="tts-speed">本地 MeloTTS 语速（0.5–2.0，默认 1.0）</label><input id="tts-speed" type="number" min="0.5" max="2.0" step="0.05" value="1.0"><label for="tts-voice">EdgeTTS 音色</label><input id="tts-voice" placeholder="zh-CN-XiaoxiaoNeural" maxlength="128"><button id="test-tts" class="secondary" type="button">试听所选语音</button><button id="test-tts-opus" class="secondary" type="button">试听 Opus 还原</button><audio id="tts-preview" controls hidden></audio><a id="download-tts" download="tts-preview.wav" hidden>下载本次试听音频</a><p>原始试听与 Opus 还原可分别下载，再导入 ESP32 网页对比播放。两者都正常而对话卡顿时，重点看 ESP32 的“对话音频诊断”。试听在当前浏览器播放；切换后点击下方“保存并应用”，设备对话才会使用所选方式。设备网络、音量和麦克风在 ESP32 网页设置。</p><div class="callout">API Key 保存在本机配置中，页面只显示是否已配置，不会读回密钥。</div></aside>
+          <aside class="card"><h2>语音链路</h2><dl><dt>语音识别</dt><dd id="asr-name">—</dd><dt>语音合成</dt><dd id="tts-name">—</dd></dl><label for="tts-provider">语音合成方式</label><select id="tts-provider"><option value="LocalTTS">本地 MeloTTS（CPU，无需联网）</option><option value="EdgeTTS">EdgeTTS（微软在线服务）</option><option value="BreezeTTS">BreezeTTS（大肥鱼音色，云端）</option></select><p id="tts-hint">本地模型首次需要单独下载，之后离线合成。DeepSeek 生成回答仍需要模型 API。</p><label for="tts-speed">本地 MeloTTS 语速（0.5–2.0，默认 1.0）</label><input id="tts-speed" type="number" min="0.5" max="2.0" step="0.05" value="1.0"><label for="tts-voice">EdgeTTS 音色</label><input id="tts-voice" placeholder="zh-CN-XiaoxiaoNeural" maxlength="128"><label for="breeze-voice">BreezeTTS 音色</label><select id="breeze-voice"><option value="clever">大肥鱼·机灵</option><option value="dreamy">大肥鱼·迷糊</option></select><button id="test-tts" class="secondary" type="button">试听所选语音</button><button id="test-tts-opus" class="secondary" type="button">试听 Opus 还原</button><audio id="tts-preview" controls hidden></audio><a id="download-tts" download="tts-preview.wav" hidden>下载本次试听音频</a><p>原始试听与 Opus 还原可分别下载，再导入 ESP32 网页对比播放。两者都正常而对话卡顿时，重点看 ESP32 的“对话音频诊断”。试听在当前浏览器播放；切换后点击下方“保存并应用”，设备对话才会使用所选方式。设备网络、音量和麦克风在 ESP32 网页设置。</p><div class="callout">API Key 保存在本机配置中，页面只显示是否已配置，不会读回密钥。</div></aside>
         </div>
       </section>
       <section id="prompt-panel" class="panel" hidden>
+        <article class="card"><h2>连续对话</h2><label class="check"><input id="continuous-chat" type="checkbox">开启连续对话</label><p>开启后按一次键就能说，说完不用再按，服务端听出你说完了就回答；她回答完会接着听你说。一段时间没听到你说话就停下，等你下次按键。关闭时和现在一样：按一次开始、再按一次发送。设备没有回声消除，她说话时不能插话打断，要打断请按键。</p><label for="follow-up-s">回答后等你接话的时间（3–30 秒）</label><input id="follow-up-s" type="number" min="3" max="30" step="1" value="8"><small class="note">无论是否开启，鲸鱼娘问“歌练好了，要不要现在听？”这类问题时，都会自动听你的回答。</small></article>
         <article class="card"><h2>会话上下文</h2><label for="context-turns">重连后恢复最近几轮对话（0–12）</label><input id="context-turns" type="number" min="0" max="12" value="6"><p>默认恢复同一设备及 Client ID 在最近 24 小时内的 6 轮完整对话，最多 6000 字；0 表示不恢复。同一次连接内仍有上下文。对话记录与模型长期记忆是不同功能。</p></article>
         <article class="card"><h2>鲸鱼娘的系统提示词</h2><p>设定角色、说话风格和回答习惯。提示词决定行为规则，MCP 工具定义决定实际能力。</p><label for="prompt">系统提示词</label><textarea id="prompt" rows="8" maxlength="16000"></textarea></article>
-        <article class="card"><h2>当前实现的 Flipper 工具</h2><p>下列能力由 ESP32 和 Flipper 代码实现。设备连接后实际通过 MCP 上报工具列表；增加提示词不会新增硬件能力。</p><label class="check"><input id="tool-calling" type="checkbox">允许模型调用设备上报的工具</label><div id="tools" class="tool-list"></div><details><summary>自动附加的工具使用规则</summary><pre id="tool-policy"></pre></details></article>
+        <article class="card"><h2>当前实现的 Flipper 工具</h2><p>下列能力由 ESP32 和 Flipper 代码实现。设备连接后实际通过 MCP 上报工具列表；增加提示词不会新增硬件能力。</p><label class="check"><input id="tool-calling" type="checkbox">允许模型调用设备上报的工具</label><label class="check"><input id="ui-confirm" type="checkbox">危险操作（发送/模拟/写入/删除）前语音确认</label><small class="note">开启时，鲸鱼娘操作 Flipper 界面遇到发送、模拟、写入、删除等按钮会先问你一次；关闭后直接按下。</small><div id="tools" class="tool-list"></div><details><summary>自动附加的工具使用规则</summary><pre id="tool-policy"></pre></details></article>
       </section>
       <section id="device-panel" class="panel" hidden>
         <div class="grid"><article class="card"><h2>连接 ESP32</h2><label for="voice-url">设备访问的 Server URL</label><input id="voice-url" type="url" maxlength="192" placeholder="ws://192.168.1.10:8000/xiaozhi/v1/"><p>先连接 ESP32 的设置热点，配置 2.4 GHz Wi-Fi。随后按 Flipper 显示的 IP 打开设备网页，下载设备身份文件，在这里导入。此地址应使用电脑局域网 IP 或服务器域名，不能使用 localhost。</p><h3>已连接设备</h3><div id="devices" class="device-list">暂无连接</div></article>
           <article class="card"><h2>生成设备连接配置</h2><p>这是 ESP32 连接语音服务的凭据，不是 API Key，也不是管理口令。</p><label for="identity-file">导入 ESP32 导出的设备身份</label><input id="identity-file" type="file" accept=".json,application/json"><form id="device-form"><label for="device-id">Device ID</label><input id="device-id" maxlength="80" required><label for="client-id">Client ID</label><input id="client-id" maxlength="80" required><button type="submit">生成连接配置</button></form><div id="issued" hidden><label for="device-token">Device token（可复制到 ESP32 网页）</label><textarea id="device-token" rows="3" readonly></textarea><small id="expires"></small><button id="download-connection" class="secondary" type="button">下载连接配置 JSON</button><button id="copy-token" class="secondary" type="button">复制 Token</button></div></article></div>
+        <article class="card screen-card"><h2>Flipper 屏幕</h2><p>显示鲸鱼娘最近一次读回的 Flipper 屏幕。点“刷新屏幕”会让设备立即截一帧，不会按键。</p>
+          <div class="history-controls"><label for="screen-device">设备</label><select id="screen-device"><option value="">暂无语音连接</option></select><button id="screen-refresh" class="secondary" type="button">刷新屏幕</button></div>
+          <div class="screen-mirror"><img id="screen-image" alt="Flipper 屏幕截图" width="512" height="256" hidden><p id="screen-empty" class="note">还没有截图。</p></div>
+          <small id="screen-meta" class="note"></small><pre id="screen-view" hidden></pre></article>
+      </section>
+      <section id="singing-panel" class="panel" hidden>
+        <article class="card"><div class="label-row"><h2>唱歌服务</h2><button id="singing-refresh" class="secondary" type="button">刷新</button></div>
+          <p id="singing-status" class="note" role="status">读取中…</p>
+          <p>翻唱在电脑上的 <code>singing/worker.py</code> 里用显卡完成；下面的路径都是那台电脑上的路径。没练过的歌第一次要练一两分钟，练习期间语音不会断开，练好后鲸鱼娘会主动问要不要听。</p></article>
+        <div class="grid"><article class="card"><h2>歌曲路径</h2>
+          <label for="songs-dirs">原曲目录（每行一个，可写绝对路径，如 D:\Music；会往下找 3 层子文件夹）</label><textarea id="songs-dirs" rows="4" maxlength="2200" spellcheck="false"></textarea>
+          <label for="download-dir">链接下载目录（留空 = 第一个原曲目录下的 downloads）</label><input id="download-dir" maxlength="260" spellcheck="false">
+          <label for="cache-dir">翻唱成品目录</label><input id="cache-dir" maxlength="260" spellcheck="false">
+          <small class="note">原曲目录必须已经存在；下载和成品目录不存在会自动创建。改成品目录后，旧目录里练好的歌不会自动搬过去。保存在 singing/config.local.yaml。</small>
+          <button id="singing-save" class="secondary" type="button">保存路径</button></article>
+          <article class="card"><h2>从链接添加歌曲</h2><p>粘贴 B 站、YouTube 等单首歌曲的链接，电脑会用 yt-dlp 下载音频到下载目录，然后开始练。只用于自己设备上的个人欣赏。</p>
+            <label for="song-url">歌曲链接</label><input id="song-url" type="url" maxlength="500" placeholder="https://www.bilibili.com/video/BV…">
+            <label for="song-title">歌名（可选，建议“歌手 - 歌名”）</label><input id="song-title" maxlength="80">
+            <button id="song-download" type="button">下载并练习</button><p id="download-state" class="note" role="status"></p></article></div>
+        <article class="card"><h2>曲库</h2><p id="library-note" class="note"></p><div id="library" class="tool-list"></div></article>
       </section>
       <section id="history-panel" class="panel" hidden>
-        <article class="card"><h2>对话记录</h2><p>按设备查看识别文字、模型回复和语音处理状态。回复文字不代表已经播放成功；语音连接断开也不等于 UART 断开。仅从升级后开始记录，保留最近 10000 条文字与状态，不保存原始录音。</p>
-          <div class="history-controls"><label for="history-device">设备</label><select id="history-device"><option value="">全部设备</option></select><button id="history-refresh" class="secondary" type="button">查看最新</button><button id="history-older" class="quiet" type="button" disabled>更早记录</button><button id="history-clear" class="danger" type="button">清空全部记录</button></div>
+        <article class="card"><h2>对话记录</h2><p>按设备查看对话、鲸鱼娘每一步的操作和当时的 Flipper 屏幕截图。回复文字不代表已经播放成功；语音连接断开也不等于 UART 断开。保留最近 10000 条文字与 400 张截图，不保存原始录音。</p>
+          <div class="history-controls"><label for="history-device">设备</label><select id="history-device"><option value="">全部设备</option></select><button id="history-refresh" class="secondary" type="button">查看最新</button><button id="history-older" class="quiet" type="button" disabled>更早记录</button><button id="history-clear" class="danger" type="button">清空全部记录</button><label class="check"><input id="history-verbose" type="checkbox">显示录音／播放状态</label></div>
           <p class="note">选择设备后可只清空该设备。清空会永久删除相应文字记录、重置对话上下文，并结束对应设备当前的语音会话；下次对话重新开始，模型设置和设备凭据保留。</p>
           <p id="history-note" class="note" role="status">读取中…</p><div id="history-events" aria-live="polite"></div>
         </article>

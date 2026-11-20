@@ -1,0 +1,9 @@
+{
+  "format": "deepflipper.app",
+  "v": 1,
+  "sdk": 2,
+  "app_id": "deepflipper.pet",
+  "name": "Whale Pet",
+  "summary": "Offline pet care and saved state. Local UI has expressions; RPC care saves state without opening the pet screen.",
+  "app": "/ext/apps/Games/whale_pet.fap"
+}

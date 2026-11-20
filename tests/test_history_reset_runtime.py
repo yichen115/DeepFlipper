@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'server/main/xiaozhi-server'))
-HAS_RUNTIME = all(importlib.util.find_spec(name) for name in ('funasr', 'sherpa_onnx', 'opuslib_next'))
+HAS_RUNTIME = all(importlib.util.find_spec(name) for name in ('sherpa_onnx', 'opuslib_next'))
 
 
 @unittest.skipUnless(HAS_RUNTIME, 'Full voice dependencies are tested inside the Docker image')

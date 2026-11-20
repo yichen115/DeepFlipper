@@ -48,6 +48,9 @@ public:
     inline int server_sample_rate() const { return server_sample_rate_; }
     inline int server_frame_duration() const { return server_frame_duration_; }
     inline const std::string& session_id() const { return session_id_; }
+    // Server hello "continuous": true — each talk press listens until the server's VAD ends
+    // the sentence, and the device keeps listening after every reply (follow-up window).
+    inline bool continuous() const { return continuous_; }
 
     void OnIncomingAudio(std::function<void(std::unique_ptr<AudioStreamPacket> packet)> callback);
     void OnIncomingJson(std::function<void(const cJSON* root)> callback);
@@ -80,6 +83,7 @@ protected:
     int server_sample_rate_ = 24000;
     int server_frame_duration_ = 60;
     bool error_occurred_ = false;
+    bool continuous_ = false;
     std::string session_id_;
     std::chrono::time_point<std::chrono::steady_clock> last_incoming_time_;
 

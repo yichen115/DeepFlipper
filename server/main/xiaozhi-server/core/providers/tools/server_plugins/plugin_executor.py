@@ -97,6 +97,9 @@ class ServerPluginExecutor(ToolExecutor):
 
         # 获取必要的函数
         necessary_functions = ["handle_exit_intent", "get_lunar"]
+        # 唱歌：singing.enabled 时总是提供（data/.config.yaml 里常把 functions 覆盖成 []）
+        if (self.config.get("singing") or {}).get("enabled", False):
+            necessary_functions += ["sing_song", "list_songs"]
 
         # 获取配置中的函数
         config_functions = self.config["Intent"][
@@ -122,10 +125,6 @@ class ServerPluginExecutor(ToolExecutor):
                             "description"
                         ] = fun_description
 
-                # 新闻插件：根据配置更新新闻源参数描述
-                if func_name == "get_news_from_newsnow":
-                    self._init_news_source_description(func_item, func_name)
-
                 tools[func_name] = ToolDefinition(
                     name=func_name,
                     description=func_item.description,
@@ -137,20 +136,3 @@ class ServerPluginExecutor(ToolExecutor):
     def has_tool(self, tool_name: str) -> bool:
         """检查是否有指定的服务端插件工具"""
         return tool_name in all_function_registry
-
-    def _init_news_source_description(self, func_item, func_name):
-        """根据连接配置初始化新闻工具的参数描述"""
-        news_sources = (
-            self.config.get("plugins", {})
-            .get(func_name, {})
-            .get("news_sources", "")
-        )
-        if not news_sources:
-            news_sources = "澎湃新闻;百度热搜;财联社"
-        sources_str = news_sources.replace(";", "、")
-        try:
-            func_item.description["function"]["parameters"]["properties"]["source"][
-                "description"
-            ] = f"新闻源的标准中文名称，例如{sources_str}等。可选参数，如果不提供则使用默认新闻源"
-        except (KeyError, TypeError):
-            pass

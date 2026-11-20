@@ -26,15 +26,10 @@ _wakeup_logger = setup_logging()
 WAKEUP_CONFIG = {
     "refresh_time": 10,
     "responses": [
-        "我一直都在呢，您请说。",
-        "在的呢，请随时吩咐我。",
-        "来啦来啦，请告诉我吧。",
-        "您请说，我正听着。",
-        "请您讲话，我准备好了。",
-        "请您说出指令吧。",
-        "我认真听着呢，请讲。",
-        "请问您需要什么帮助？",
-        "我在这里，等候您的指令。",
+        "鲸鱼娘在呢，你说吧。",
+        "我在听哦，请讲。",
+        "来啦来啦，有什么事呀？",
+        "嗯嗯，我准备好啦。",
     ],
 }
 
@@ -69,6 +64,8 @@ async def handleHelloMessage(conn: "ConnectionHandler", msg_json):
             conn.logger.bind(tag=TAG).debug("客户端启用了服务端AEC")
             conn.client_aec = True
 
+    from core.utils import continuous_chat
+    conn.welcome_msg["continuous"] = continuous_chat.enabled(conn)
     await conn.websocket.send(json.dumps(conn.welcome_msg))
 
     # The device waits for the server hello before processing MCP messages.
@@ -76,6 +73,15 @@ async def handleHelloMessage(conn: "ConnectionHandler", msg_json):
         asyncio.create_task(send_mcp_initialize_message(conn))
         # 并发预发 tools/list，让帧排在 audio 流之前到达 client
         asyncio.create_task(send_mcp_tools_list_request(conn))
+
+    # 上次断开时有练好还没问过的歌：等用户说完第一句话再问要不要听
+    singing = (getattr(conn, "config", None) or {}).get("singing") or {}
+    if singing.get("enabled", True) and getattr(conn, "device_id", None):
+        try:
+            from plugins_func.functions.sing_song import greet_pending
+            greet_pending(conn)
+        except Exception as error:
+            conn.logger.bind(tag=TAG).warning(f"唱歌提醒没有排上：{type(error).__name__}")
 
 
 async def checkWakeupWords(conn: "ConnectionHandler", text):
@@ -114,7 +120,7 @@ async def checkWakeupWords(conn: "ConnectionHandler", text):
             "voice": "default",
             "file_path": "config/assets/wakeup_words_short.wav",
             "time": 0,
-            "text": "我在这里哦！",
+            "text": "鲸鱼娘在这里哦！",
         }
 
     # 获取音频数据

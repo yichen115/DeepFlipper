@@ -13,7 +13,7 @@ is the target behavior, not a claim that all milestones have shipped.
 | UI/settings | English status/IP/setup-password/help and audio shortcuts; no long-text credentials entry; live updates preserve selection and refresh the setup address |
 | Passport | Whale-girl bust portraits with collar/shoulders for happy/normal/angry moods, without a separate whale emblem; original nickname, level and XP mechanics retained |
 | Configuration | Authenticated ESP32 AP/LAN web setup, versioned NVS profile, temporary Wi-Fi trials, identity/config file exchange, periodic UART status and bounded shortcut commands |
-| Tools | 20 MCP tools: adds live NFC read, IR learning, OOK RAW capture, SD file read/space, clock and GPIO; app lifecycle, short/long keys, saved actions and query/cancel |
+| Tools | 23 MCP tools: live NFC read, IR learning, OOK RAW capture, SD file read/space, clock and GPIO; app lifecycle, opt-in app catalog, semantic action discovery/call, short/long keys, saved actions and query/cancel |
 | Application coexistence | Loader admission cancels assistant NFC, frees the mascot worker stack, and yields UART RPC heap for local apps; RPC-origin app launches preserve their command transport; exit/failure restores the worker and local-app UART |
 | ESP32 source | Dedicated S3 board, reference I2S audio, GPIO48 WS2812, local button, UART RPC/MCP bridge |
 | Voice | Reuses XiaoZhi ASR/LLM/TTS transport; direct WS/WSS configuration bypasses managed OTA activation |
@@ -33,6 +33,8 @@ is the target behavior, not a claim that all milestones have shipped.
 - Full encrypted/application-specific card reads/writes, generic FSK decoding,
   BLE/HID, ADC/PWM and arbitrary third-party app semantic actions remain unimplemented.
   Opening an app does not make its internal features into working AI tools.
+  Opt-in FAPs expose semantic actions through the shared SDK; see
+  [the application control guide](app-control.zh-CN.md).
 - Wi-Fi supports ordinary 2.4 GHz personal/open networks, scan/manual SSID and
   AP/LAN web configuration. Enterprise authentication, static IP and device OTA
   management are not implemented. Higher-rate UART, AP/STA channel changes,
@@ -253,7 +255,7 @@ reports real voice WS phases without importing board types into the protocol.
 The old profile and SSID list migrate once when upgrading the app without
 wiping NVS. The full merged BIN includes padding over the NVS region and resets
 configuration/identity; existing installations with matching partitions and
-unchanged ota_0 boot selection can update only xiaozhi.bin at 0x20000. New Wi-Fi credentials remain a trial
+unchanged ota_0 boot selection can update only deepflipper.bin at 0x20000. New Wi-Fi credentials remain a trial
 until matching SSID/IP confirmation; failure keeps the stored profile and recovery
 AP. Profile edits use one NVS JSON value with revision checks. The web API returns
 public fields and secret-presence flags; API responses are sent after releasing
@@ -466,13 +468,25 @@ Flipper-side protocol change was made in this correction.
 Measured local TTS WAV examples were around -30 dBFS RMS. Generated speech now
 targets -20 dBFS RMS, limits gain to 16 dB and retains 1 dB peak headroom; near-
 silence is not amplified. The live preview measured -20.0 dBFS RMS, -6.6 dBFS peak
-and zero clipped samples. Device audio initially prebuffers four 60 ms packets
-instead of two, with queue-order tests. On the DeepFlipper board alone, speaker
+and zero clipped samples. Device audio initially prebuffers network TTS until eight
+60 ms packets (480 ms of audio) are queued or 600 ms have passed since the first
+packet, and re-enters that gate after a playback starvation, with queue-order tests
+(`main/audio/network_playback.h`). On the DeepFlipper board alone, speaker
 I2S now outputs identical 32-bit left/right slots, avoiding L/R-average attenuation
 and channel-strap dependence; its PCM packing is tested at signed limits, half
 volume and mute. A fixed scratch buffer replaces per-frame TX allocations. Mic
 format and pins are unchanged. Electrical noise, supply limits and the user's
 amplifier are still unmeasured; these changes are not a physical noise diagnosis.
+
+Speech stutter mitigation (board-scoped, `deepflipper-s3/config.json`): the
+generic low-memory Wi-Fi/TCP profile is replaced for this N16R8 board by Espressif's
+octal-PSRAM range — static/dynamic RX buffers 8/32, AMPDU RX BA window 16, TCP
+receive window 32768 with TCP/TCP-IP mailboxes 32/64, and Wi-Fi/lwIP allocations
+preferring PSRAM. The Opus decode task runs at priority 3 (below `audio_output` at
+4, which now has a 4 KB stack), per-sentence `<<`/`>>` text logs are debug-level,
+and while the application requests `PERFORMANCE` (listening/speaking) the board
+holds an `ESP_PM_CPU_FREQ_MAX` lock so DFS does not drop to 80 MHz mid-turn.
+These are configuration changes; their effect on real Wi-Fi jitter is unmeasured.
 
 ## ESP32 browser audio preview
 
@@ -541,3 +555,224 @@ modem sleep even while the WebSocket stays open. Manual ESP32 standby stops AP,
 STA and voice but keeps UART commands; desktop OK or BOOT click wakes Wi-Fi.
 The active Flipper Expansion service still blocks deep sleep. No battery/current
 measurements or headset support are claimed; S3 lacks Classic HFP/A2DP.
+
+## Semantic application SDK — November 15, 2026
+
+The shared `lib/deepflipper_app/` SDK is linked only into opt-in external apps.
+An action table supplies names, descriptions, schemas and app-thread handlers.
+The SDK implements describe, command ownership, cooperative cancellation and
+atomic bounded result publication. Three fixed MCP tools discover apps and query/call actions
+without changing ESP32 or Python for each new app. Existing capture tools wrap
+this same protocol. No new resident service, protobuf tag or firmware ABI was
+introduced. SDK v2 additionally supports opt-in retained sessions with a renewable
+5–60 second lease. Full JSON Schema enforcement remains unimplemented; app
+handlers remain responsible for argument validation.
+
+The default adapter exposes nfc.read, ir.learn, subghz.record and subghz.decode.
+It also exposes subghz.rx.start/state/stop for separate spoken commands to start
+receive, inspect buffered samples and stop/save. The radio is stopped when the
+4096-sample buffer fills. Lease/PIN/link cleanup discards unsaved data and frees
+the radio. A required idempotent cleanup hook supports retained resources;
+one-shot SDK apps cannot accidentally retain a process. Failed result writes
+or rename also release retained hardware. Capture allocation checks free heap
+and contiguous space before requesting its large buffer.
+Offline decoding uses the firmware protocol registry with OOK650 RAW, a 64 KiB
+file limit and at most 4096 timings, without keystore loading or radio output.
+It reports first-frame protocol/summary, repeated frame count, truncation and
+explicit decoded:false for unknown signals. Generic FSK and encrypted semantic
+decoding are not claimed. The model policy describes discovery and these limits.
+Decoders are instantiated sequentially in firmware registry order, sharing one
+bounded timing buffer; RAW-only decoders are excluded before allocation. Analysis
+returns the first recognized protocol and that protocol's repeated frame count.
+Heap/contiguous-block checks return insufficient_memory before large allocations.
+
+The bridge checks preexisting mailboxes, strictly validates result identity,
+version and types, and either confirms retention or verifies Loader release before
+completion. Retained app path/lease appears in state and status. The bridge reuses
+only its own retained app, expires sessions even under PIN lock and resets the
+transport on unconfirmed cleanup. Background NFC scans and GPIO mutations cannot
+compete with retained resources. Consumed mailboxes are removed after use.
+Both sides bound JSON nesting before recursive
+parsing. SDK scratch buffers use bounded heap allocations to preserve the FAP's
+4 KiB thread stack. RPC detach/stop ordering and queue limits are preserved.
+
+The opt-in SD catalog at `/ext/deepflipper/apps/` discovers registered SDK apps
+without launching them. Strict, bounded metadata is bound to the built FAP's
+size and MD5, checked through existing Storage RPC. Invalid/stale entries have
+explicit rejection reasons. Four candidates per page and a 1000-entry scan
+limit bound work and memory. File matching is not a signature or runtime
+verification; live describe remains the source of action schemas. The normal
+Flipper build exports the default FAP's registration into the updater resources.
+
+Validation of this revision:
+
+- All 30 native regression groups pass, including the complete production SDK
+  with real Frozen parsing, describe/dispatch, PIN lock, deadline wrap, malformed
+  results, partial writes, stale mailboxes, version/identity errors, nesting
+  bounds, cancellation and app cleanup.
+- Retained-session tests execute production SDK and native action code through
+  start/state/stop, no-relaunch reuse, lease renewal/expiry, PIN/session-close
+  cleanup, unsupported retention, and failed publication/stop. The production
+  radio adapter is tested for RSSI gating, buffer capacity, low-memory admission,
+  saving/discard, invalid arguments, initialization/save failures and idempotent
+  resource cleanup. These platform boundaries are simulated, not hardware tests.
+- The production offline RF adapter is tested with the actual Princeton feed
+  function and generated known pulses, unknown pulses, truncation, malformed
+  values, path restrictions and release of all allocated decoder contexts.
+  Storage/FlipperFormat are simulated in that test; it is not a physical RF test.
+- Python discovery runs 82 tests: 70 pass and 12 full voice-runtime tests skip
+  because their optional audio dependencies are absent. This includes executor
+  routing for the three new tools, catalog export validation and three
+  fresh-checkout protobuf metadata tests. The documented isolated test command
+  supplies aiohttp, PyYAML, NumPy and OpenAI without changing system Python.
+- The real F7 Tools FAP compiles and passes APPCHK against SDK 88.25. The complete
+  updater package builds with a 5112-byte firmware/radio margin and includes the
+  matching SD FAP and catalog registration. No device was flashed.
+- ESP32-S3 N16R8 target compilation and linking pass under official IDF release/v6.1
+  source c1d1695f8f8310fa7e408ab97f95ab4e76b3be88 and GCC 15.2. The factory image
+  and application-only image are exported by the normal nonce/hash-checked build
+  wrapper, using its new -UseCurrentEnvironment option. Windows uses Ninja
+  response files to avoid a command-line-length failure in deep workspaces.
+  Build logs retain upstream IDF component/include warnings and Flipper LTO
+  startup-signature warnings; neither is evidence of runtime hardware behavior.
+- The broader inherited ESP32 script suite completed 140 tests with 12 Windows
+  environment errors and 18 skips (temporary-directory cleanup while it is the
+  process cwd, default GBK reads of UTF-8 files, and unavailable host compiler).
+  It is recorded as unsuccessful, separately from the passing project/native
+  tests and real ESP32 target build. Physical UART/audio/RF end-to-end behavior
+  still needs hardware verification.
+
+Fresh archive builds also now obtain protobuf version 0.30 from the pinned
+dependency's Changelog, rather than invoking Git in a directory with no own
+metadata and accidentally reading the parent project's release tags.
+
+## Offline pet preview — November 15, 2026
+
+Whale Pet is an opt-in external FAP at `/ext/apps/Games/whale_pet.fap`.
+It provides local pat/feed/play/rest/wake, five growth levels, a stats page and
+19 native 64x64 expression/animation clips. The user's reference establishes
+plain white rice as the favorite food. Rice anticipation, eating from a bowl,
+satisfaction and a full-pet response are separate phases/clips. SD art consists
+of 237 unique frames (121344 bytes), loaded one frame at a time. GIFs are host
+previews; the device does not decode GIFs. GUI callbacks perform no SD I/O.
+
+The platform-neutral care model bounds offline catch-up and avoids loss of
+earned affection/levels. Two fixed-size CRC32 save slots alternate, sync and
+read back before acknowledgement. A previous valid slot survives a torn write;
+two damaged slots remain read-only. RTC rollback resets the care timers rather
+than wrapping arithmetic. These are casual local rules, not trusted battle scores.
+
+The same FAP exposes pet.state/pet.interact through the existing SDK, catalog
+and generic ESP32 tools. RPC care saves state with displayed:false. It does
+not open an animated foreground pet screen. Manual launch uses the existing
+local-app policy: AI UART is suspended and resumes on exit. Live voice inside
+the pet screen, desktop pet-save integration and independently composited emotions/mouth
+are not implemented. There is no battle or multiplayer implementation.
+
+See [the pet guide](pet-system.zh-CN.md) for controls, limitations and next stages.
+
+## Display-only home and pet shortcut — November 15, 2026
+
+The home screen now presents the existing 64x64 character at native scale in
+a full 128x64 room. Time, battery, one assistant state and PET> occupy the four
+corners. Day/night rooms switch at 07:00 and 20:00 using the Flipper RTC.
+No feeding, petting, stat editing or pet pages are added to the desktop.
+The desktop does not yet read the pet save or share the FAP's 19 care clips.
+
+In Default Mode, short Right opens `/ext/apps/Games/whale_pet.fap` through the
+normal Loader error UI. Blocking warnings and level-up animation acknowledgements
+retain priority. AI short OK toggles recording and long OK opens the system menu,
+including when Debug is enabled. Other bindings and Dummy Mode remain intact.
+Manual pet launch still suspends AI UART; exiting restores the voice desktop.
+
+The asset exporter precomposes 129 frames per day/night bank into SD
+`deepflipper/home_frames.bin` (264192 bytes). Worker staging and displayed frames
+each use a static 1024-byte buffer. The GUI draws the latter under the sprite
+mutex, with no SD access or large automatic frame buffer. Missing files, wrong
+length, failed seek and short reads select the complete built-in room fallback.
+Speaking overlays the original live mouth at its translated coordinates;
+muted or zero-volume speech uses idle art and the MUTE badge.
+
+Native tests execute the production input, bubble callback, animation
+acknowledgement, desktop scene and complete renderer. They check voice/menu/pet
+routing, warnings/level-ups, original shortcuts, day/night banks, SD failures and
+mouth bounds. Python tests check every pixel of all 258 composed frames against
+the source character/mask and room. `render_home_preview.py` renders captured
+production draw calls with the firmware font/icons into `assets/whale-pet/home`;
+these are reproducible host previews, not physical-device screenshots.
+
+Validation: 35 native test groups passed; the Python suite ran 89 tests with
+77 passing and 12 optional full-voice dependency skips. The complete F7 updater
+was built and its compressed resources were decoded to verify the exact home
+atlas, pet atlas, pet FAP and registration bytes. Firmware is 875788 bytes,
+leaving 4852 bytes before the packaged radio address. No device was flashed.
+
+## Room-integrated home info and Whale Pet B2 menu — November 15, 2026
+
+The character art is unchanged (the accepted 64x64 sprite). The home room was
+redrawn with sparse wallpaper, wainscot, floorboards, a curtained window, an
+alarm clock on a cabinet, a shelf and a rice cooker on a counter. The worker
+thread now draws the live values into the frame it already composes: the time
+on the clock screen and the battery on the rice cooker's screen (custom 4x7
+digits, at least 2 px margin for every time and for `100%`), steam while
+charging, and one 9x9 bubble near her head for lock / assistant state / the
+pet's wish. The GUI callback only copies the finished frame, so it still never
+touches SD and no longer formats text. The background-window hint moved to the
+top-left corner.
+
+Whale Pet publishes `/ext/deepflipper/pet/home.bin` after every verified save:
+"DFH2" and up to eight `{time, wish}` entries for the next 48 hours, produced by
+replaying the real catch-up rule (sleeping, hungry, sleepy, bored). The home
+reads it about every five seconds and shows the bubble that is due; a sleeping
+pet uses the home sleeping animation. The save slots stay the source of truth.
+
+The pet app draws its own day/night room (in the FAP) and composites each
+frame with `pet_masks.bin` (paper + 1 px halo) so she stays readable. One
+labelled action is shown at the bottom (Pat, Feed, Play, Catch, Sleep, Stats;
+Wake/Stats while asleep); Left/Right choose, OK does it. The pure controller
+`pet_ui.c` adds: need bubbles and a need-based default selection, visible stat
+flashes, cooldown/full/tired explanations, a busy lock while a reaction plays,
+self-waking sleep, level-up celebration, welcome lines by time away/hour, pat
+combos, and the Catch Rice mini-game (shares the play cooldown/energy rule).
+Only real state changes are written to SD.
+
+The complete F7 updater package was built with the official Linux toolchain 39
+(`updater_package DEBUG=0`): firmware 876300 bytes (+512), leaving 4340 bytes
+before the radio address. The packed resources were decoded and match the
+project's home atlas, pet frames and masks, both FAPs and registrations. ESP32
+and server code are unchanged. No device was flashed.
+
+## Flash trim: hidden dolphin films — November 16, 2026
+
+The whale-girl home draws over every non-L0 desktop animation, so the internal
+L1_Tv and L1_BadBattery films and the Levelup1/Levelup2 one-shot films were
+dead weight in flash. They were removed; L1_NoSd stays as a one-frame internal
+fallback. A pending level-up is still announced by the L0 NewMail card; the
+next press upgrades the level and calls `deepflipper_celebrate()`, which shows
+the happy animation and a star bubble on the home for about four seconds.
+Expected saving is about 18 KB; confirm with the next Windows build.
+
+## CPU voice server, whale-girl persona and ESP32 cleanup — November 16, 2026
+
+ASR moved from PyTorch FunASR (SenseVoiceSmall fp32, ~940 MB) to the same
+SenseVoice model in int8 through sherpa-onnx (`sherpa_onnx_local`, ~240 MB,
+two threads, decoded in a worker thread). PyTorch, FunASR and ModelScope are no
+longer installed. Old configs selecting `FunASR` are migrated to `SherpaASR`.
+
+TTS uses a gated sentence pipeline by default (`whole_utterance: false`): the
+first clause is synthesized as soon as it streams in, and clauses are held
+until the reply is complete; they are released only once the measured
+synthesis speed (x1.3 safety) shows the remainder will be ready before the
+buffered audio runs out, or once 4 s of audio is buffered. A slow CPU therefore
+falls back to the previous whole-utterance behaviour instead of stuttering.
+MeloTTS warms up at load. Emoji are stripped from LLM output; the expression
+sent to the Flipper is chosen from the first clause's wording.
+
+The persona is 鲸鱼娘 in config.yaml, examples and the base template; xiaozhi
+prompts, wake-word replies, weather/location lookups and unused providers,
+plugins and requirements were removed. On the ESP32, only the deepflipper-s3
+board and en-US locale remain, the image is `deepflipper.bin`, Wi-Fi/lwIP RX
+buffers and the TCP window are raised for this PSRAM board, the Opus decoder
+runs at priority 3, per-message JSON logs are debug-only, and a max-CPU PM lock
+is held while listening/speaking. Host tests: 36 native groups, 103 Python
+tests. ESP32 image and server image builds are pending on the user's machines.

@@ -31,11 +31,9 @@ _setup_websockets_logger()
 
 
 from core.connection import ConnectionHandler
-from config.config_loader import reload_local_config
 from core.auth import AuthManager, AuthenticationError
 from core.device_auth import authorize_device
 from core.utils.modules_initialize import initialize_modules
-from core.utils.util import check_vad_update, check_asr_update
 
 TAG = __name__
 
@@ -162,57 +160,6 @@ class WebSocketServer:
         else:
             # 如果是普通 HTTP 请求，返回 "server is running"
             return websocket.respond(200, "Server is running\n")
-
-    async def update_config(self) -> bool:
-        """更新服务器配置并重新初始化组件
-
-        Returns:
-            bool: 更新是否成功
-        """
-        try:
-            async with self.config_lock:
-                # 重新获取配置（使用异步版本）
-                new_config = await reload_local_config()
-                if new_config is None:
-                    self.logger.bind(tag=TAG).error("获取新配置失败")
-                    return False
-                self.logger.bind(tag=TAG).info(f"获取新配置成功")
-                # 检查 VAD 和 ASR 类型是否需要更新
-                update_vad = check_vad_update(self.config, new_config)
-                update_asr = check_asr_update(self.config, new_config)
-                self.logger.bind(tag=TAG).info(
-                    f"检查VAD和ASR类型是否需要更新: {update_vad} {update_asr}"
-                )
-                # 更新配置
-                self.config = new_config
-                # 重新初始化组件
-                modules = initialize_modules(
-                    self.logger,
-                    new_config,
-                    update_vad,
-                    update_asr,
-                    "LLM" in new_config["selected_module"],
-                    False,
-                    "Memory" in new_config["selected_module"],
-                    "Intent" in new_config["selected_module"],
-                )
-
-                # 更新组件实例
-                if "vad" in modules:
-                    self._vad = modules["vad"]
-                if "asr" in modules:
-                    self._asr = modules["asr"]
-                if "llm" in modules:
-                    self._llm = modules["llm"]
-                if "intent" in modules:
-                    self._intent = modules["intent"]
-                if "memory" in modules:
-                    self._memory = modules["memory"]
-                self.logger.bind(tag=TAG).info(f"更新配置任务执行完毕")
-                return True
-        except Exception as e:
-            self.logger.bind(tag=TAG).error(f"更新服务器配置失败: {str(e)}")
-            return False
 
     async def _handle_auth(self, websocket: websockets.ServerConnection):
         # 先认证，后建立连接

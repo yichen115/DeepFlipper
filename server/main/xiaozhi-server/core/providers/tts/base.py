@@ -3,6 +3,7 @@ import re
 import math
 import uuid
 import queue
+import time
 import asyncio
 import threading
 import traceback
@@ -111,7 +112,16 @@ class TTSProviderBase(ABC):
         self.tts_stop_request = False
         self.processed_chars = 0
         self.is_first_sentence = True
-        self.whole_utterance = bool(config.get("whole_utterance", True))
+        # False = sentence pipeline: speak the first clause early and synthesize
+        # the rest while it plays, but only release audio once the measured
+        # synthesis speed guarantees the remainder arrives before it is needed
+        # (so a slow CPU degrades to the old whole-utterance behaviour, never
+        # to choppy speech). True = wait for the whole reply, then synthesize.
+        self.whole_utterance = bool(config.get("whole_utterance", False))
+        self.pipeline_safety = float(config.get("pipeline_safety", 1.3))
+        self.pipeline_max_hold_s = float(config.get("pipeline_max_hold_s", 4.0))
+        self.frame_seconds = 0.06
+        self._pipe = None
 
     def generate_filename(self, extension=".wav"):
         return os.path.join(
@@ -139,7 +149,7 @@ class TTSProviderBase(ABC):
         # audio. It resets the existing ESP32/Flipper UI without closing UART.
         self.tts_audio_queue.put((SentenceType.LAST, [], None, sentence))
 
-    def to_tts_stream(self, text, opus_handler: Callable[[bytes], None] = None) -> None:
+    def to_tts_stream(self, text, opus_handler: Callable[[bytes], None] = None, sink=None) -> None:
         # 保留原始文本用于显示/上报
         original_text = text
         text = MarkdownCleaner.clean_markdown(text)
@@ -162,6 +172,10 @@ class TTSProviderBase(ABC):
                             sample_rate=self.conn.sample_rate,
                             opus_encoder=self.opus_encoder,
                         )
+                        if sink is not None:
+                            # Pipeline mode decides when the encoded clause is released.
+                            sink(original_text, frames)
+                            break
                         # 使用原始文本用于显示/上报，等当前句编码完成后再一并入队，避免 sentence_start 抢跑导致句首断流
                         self.tts_audio_queue.put((SentenceType.FIRST, None, original_text, getattr(self, 'current_sentence_id', None)))
                         if opus_handler == self.handle_opus:
@@ -423,22 +437,33 @@ class TTSProviderBase(ABC):
                     self.tts_text_buff = []
                     self.is_first_sentence = True
                     self.tts_audio_first_sentence = True
+                    self._pipe = None
                 elif ContentType.TEXT == message.content_type:
                     self.tts_text_buff.append(message.content_detail)
                     if not getattr(self, 'whole_utterance', True):
                         segment_text = self._get_segment_text()
                         if segment_text:
-                            self.to_tts_stream(segment_text, opus_handler=self.handle_opus)
+                            self._pipeline_speak(segment_text, llm_done=False)
                 elif ContentType.ACTION == message.content_type and message.sentence_type == SentenceType.MIDDLE:
+                    self._pipeline_release()
                     self._process_remaining_text_stream(opus_handler=self.handle_opus)
                 elif ContentType.FILE == message.content_type:
+                    self._pipeline_release()
                     self._process_remaining_text_stream(opus_handler=self.handle_opus)
                     tts_file = message.content_file
                     if tts_file and os.path.exists(tts_file):
+                        if self.conn is not None:
+                            try:
+                                lead = int((self.conn.config.get("singing") or {}).get("song_lead_ms", 650))
+                            except (TypeError, ValueError, AttributeError):
+                                lead = 650
+                            self.conn.song_lead_ms = max(360, min(2400, lead))
                         self._process_audio_file_stream(
                             tts_file, callback=self.handle_opus
                         )
                 if message.sentence_type == SentenceType.LAST:
+                    if not getattr(self, 'whole_utterance', True):
+                        self._pipeline_finish()
                     self._process_remaining_text_stream(opus_handler=self.handle_opus)
                     self.tts_audio_queue.put(
                         (message.sentence_type, [], message.content_detail, message.sentence_id)
@@ -451,6 +476,88 @@ class TTSProviderBase(ABC):
                     f"处理TTS文本失败: {str(e)}, 类型: {type(e).__name__}, 堆栈: {traceback.format_exc()}"
                 )
                 continue
+
+    # ------------------------------------------------------------ pipeline
+    def _pipeline_state(self):
+        if self._pipe is None or self._pipe['sentence'] != getattr(self, 'current_sentence_id', None):
+            self._pipe = {'sentence': getattr(self, 'current_sentence_id', None), 'held': [],
+                          'audio_s': 0.0, 'synth_s': 0.0, 'chars': 0, 'open': False}
+        return self._pipe
+
+    def _pipeline_enqueue(self, text, frames):
+        sentence = getattr(self, 'current_sentence_id', None)
+        self.tts_audio_queue.put((SentenceType.FIRST, None, text, sentence))
+        if frames:
+            self.tts_audio_queue.put((SentenceType.MIDDLE, frames, None, sentence))
+
+    def _pipeline_release(self):
+        pipe = self._pipe
+        if not pipe:
+            return
+        pipe['open'] = True
+        for text, frames in pipe['held']:
+            self._pipeline_enqueue(text, frames)
+        pipe['held'] = []
+
+    def _pipeline_ready(self, llm_done):
+        """True once the audio already made outlasts synthesizing the rest."""
+        pipe = self._pipe
+        if pipe['audio_s'] <= 0:
+            return False
+        if pipe['audio_s'] >= self.pipeline_max_hold_s:
+            return True
+        if not llm_done:
+            return False
+        remaining = len("".join(self.tts_text_buff)) - self.processed_chars
+        if remaining <= 0:
+            return True
+        seconds_per_char = pipe['audio_s'] / max(1, pipe['chars'])
+        realtime_factor = pipe['synth_s'] / pipe['audio_s']
+        needed = realtime_factor * seconds_per_char * remaining * self.pipeline_safety
+        return pipe['audio_s'] >= needed
+
+    def _pipeline_speak(self, text, llm_done):
+        pipe = self._pipeline_state()
+        if not self.delete_audio_file:
+            # File-based providers keep the plain per-clause streaming path.
+            self.to_tts_stream(text, opus_handler=self.handle_opus)
+            return
+        made = []
+        started = time.monotonic()
+        self.to_tts_stream(text, opus_handler=self.handle_opus,
+                           sink=lambda original, frames: made.append((original, frames)))
+        if not made:
+            return
+        pipe['synth_s'] += time.monotonic() - started
+        pipe['audio_s'] += len(made[0][1]) * self.frame_seconds
+        pipe['chars'] += len(text)
+        if pipe['open']:
+            self._pipeline_enqueue(*made[0])
+            return
+        pipe['held'].append(made[0])
+        if self._pipeline_ready(llm_done):
+            self._pipeline_release()
+
+    def _pipeline_finish(self):
+        """LLM is done: speak the rest clause by clause, then flush."""
+        while not (self.conn and (self.conn.client_abort or self.conn.stop_event.is_set())):
+            full_text = "".join(self.tts_text_buff)
+            rest = full_text[self.processed_chars:]
+            if not rest.strip():
+                break
+            cut = -1
+            for index, char in enumerate(rest):
+                if char in self.punctuations or (index >= 24 and char in self.first_sentence_punctuations):
+                    cut = index
+                    break
+            piece = rest if cut < 0 else rest[:cut + 1]
+            self.processed_chars += len(piece)
+            segment = textUtils.get_string_no_punctuation_or_emoji(piece)
+            if segment:
+                self._pipeline_speak(segment, llm_done=True)
+            if self.failed_sentence_id == getattr(self, 'current_sentence_id', None):
+                break
+        self._pipeline_release()
 
     def _audio_play_priority_thread(self):
         # 需要上报的文本和音频列表

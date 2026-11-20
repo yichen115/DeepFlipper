@@ -5,7 +5,7 @@
   "bpp": 1,
   "packing": "row-major, LSB-first, black=1",
   "bytes_per_frame": 512,
-  "unique_frame_count": 129,
+  "unique_frame_count": 153,
   "animations": [
     {
       "id": "idle",
@@ -378,15 +378,59 @@
         125,
         121
       ]
+    },
+    {
+      "id": "sing",
+      "label": "唱歌",
+      "tick_ms": 120,
+      "loop": true,
+      "preview_status": [
+        "唱歌",
+        ""
+      ],
+      "frames": [
+        126,
+        126,
+        127,
+        128,
+        129,
+        129,
+        130,
+        130,
+        131,
+        132,
+        133,
+        134,
+        135,
+        136,
+        137,
+        138,
+        126,
+        126,
+        139,
+        140,
+        141,
+        141,
+        142,
+        142,
+        143,
+        143,
+        144,
+        145,
+        146,
+        147,
+        148,
+        149
+      ]
     }
   ],
   "mouth_frames": {
     "closed": 39,
     "small": 46,
-    "open": 126,
+    "open": 150,
     "smile": 115,
-    "sad": 127,
-    "o": 128
+    "sad": 151,
+    "o": 152
   },
   "source": "source/accepted-screen.png",
   "note": "Preview timing is scripted; hardware validation is pending. UI font is host-rasterized."

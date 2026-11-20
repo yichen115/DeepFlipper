@@ -36,7 +36,7 @@ class PackageTest(unittest.TestCase):
                          "flash_settings": {"flash_mode": "dio", "flash_size": "16MB", "flash_freq": "80m"},
                          "extra_esptool_args": {"chip": "esp32s3"}, "private_key": "DO-NOT-EXPORT"}
         self.write_manifest()
-        for name in ("xiaozhi.elf", "device-token.txt", "server.env"):
+        for name in ("deepflipper.elf", "device-token.txt", "server.env"):
             (self.esp / name).write_text("DO-NOT-EXPORT")
         fz = self.root / "build/release/flipper"
         update = fz / "f7-update-local"

@@ -8,7 +8,8 @@ enum {RpcAppEventTypeSessionClose, RpcAppEventTypeAppExit, RpcAppEventTypeDataEx
 enum {RpcAppSystemEventDataTypeBytes};
 typedef struct {int type;struct {int type;struct {const uint8_t* ptr;size_t size;} bytes;} data;} RpcAppSystemEvent;
 typedef struct {bool detached,exited,confirmed;bool result;} RpcAppSystem;
-typedef struct {RpcAppSystem* rpc;void* events;atomic_bool stop,command_ready;char command[256];} ToolContext;
+typedef struct {RpcAppSystem* rpc;void* events;atomic_bool stop,command_ready;char command[768];} ToolContext;
+typedef ToolContext DeepFlipperApp;
 static ToolContext* active;
 static void rpc_system_app_set_callback(RpcAppSystem* rpc,void* callback,void* context){(void)callback;(void)context;assert(!atomic_load(&active->stop));rpc->detached=true;}
 static void rpc_system_app_confirm(RpcAppSystem* rpc,bool okay){assert(!atomic_load(&active->stop));rpc->confirmed=true;rpc->result=okay;}

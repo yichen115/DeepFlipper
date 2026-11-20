@@ -1,0 +1,9 @@
+{
+  "format": "deepflipper.app",
+  "v": 1,
+  "app_id": "deepflipper.tools",
+  "name": "DeepFlipper Tools",
+  "summary": "NFC reading, IR learning, Sub-GHz OOK RAW capture/analysis and retained radio receive sessions.",
+  "app": "/ext/apps/Tools/deepflipper_tools.fap",
+  "sdk": 2
+}

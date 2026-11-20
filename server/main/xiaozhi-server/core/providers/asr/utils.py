@@ -27,7 +27,7 @@ EMOTION_EMOJI_MAP = {
 
 def lang_tag_filter(text: str) -> dict:
     """
-    解析 FunASR 识别结果，按顺序提取标签和纯文本内容
+    解析 SenseVoice 识别结果，按顺序提取标签和纯文本内容
 
     Args:
         text: ASR 识别的原始文本，可能包含多种标签
@@ -37,7 +37,7 @@ def lang_tag_filter(text: str) -> dict:
               {"content": "纯文本"} 如果没有标签
 
     Examples:
-        FunASR 输出格式：<|语种|><|情绪|><|事件|><|其他选项|>原文
+        SenseVoice 输出格式：<|语种|><|情绪|><|事件|><|其他选项|>原文
         >>> lang_tag_filter("<|zh|><|SAD|><|Speech|><|withitn|>你好啊，测试测试。")
         {"language": "zh", "emotion": "SAD", "emoji": "😔", "content": "你好啊，测试测试。"}
         >>> lang_tag_filter("<|en|><|HAPPY|><|Speech|><|withitn|>Hello hello.")
@@ -64,7 +64,7 @@ def lang_tag_filter(text: str) -> dict:
     if not all_tags:
         return {"content": clean_text}
 
-    # 按照 FunASR 的固定顺序提取标签，返回 dict
+    # 按照 SenseVoice 的固定顺序提取标签，返回 dict
     language = all_tags[0] if len(all_tags) > 0 else "zh"
     emotion = all_tags[1] if len(all_tags) > 1 else "NEUTRAL"
     # event = all_tags[2] if len(all_tags) > 2 else "Speech"  # 事件标签暂不使用
@@ -76,9 +76,8 @@ def lang_tag_filter(text: str) -> dict:
         # "event": event,
     }
 
-    # 添加 emoji 映射
-    if emotion in EMOTION_EMOJI_MAP:
-        result["emotion"] = EMOTION_EMOJI_MAP[emotion]
+    # Keep a plain word (not an emoji) so the LLM is not nudged to reply with emoji.
+    result["emotion"] = emotion.lower() if emotion in EMOTION_EMOJI_MAP else emotion
     # 事件标签暂不使用
     # if event in EVENT_EMOJI_MAP:
     #     result["event"] = EVENT_EMOJI_MAP[event]

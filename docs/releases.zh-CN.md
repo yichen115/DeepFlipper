@@ -10,10 +10,25 @@
 
 ```powershell
 .\scripts\build_flipper.ps1 -Package
-.\scripts\build_esp32.ps1
+.\scripts\build_esp32.ps1 -Idf v6.1.1
+# 验证脚本读取这两个测试日志，必须是这次源码的结果
+uv run --with ziglang python scripts/test_native.py *> build-native.log
+uv run --with aiohttp --with pyyaml --with numpy --with openai python -m unittest discover -s tests *> build-project-tests.log
 python scripts/validate_project.py
 python scripts/package_release.py --version v0.1.0-preview.1
 ```
+
+`validate_project.py` 会写 `build/validation.json`，打包脚本用它核对固件哈希；没有这个文件会直接拒绝打包。
+`../refer/` 下的上游参考仓库可选，存在时才检查有没有被改动。
+
+发布前确认 Git 里没有私密文件：
+
+```powershell
+git status --ignored --short server/main/xiaozhi-server/data singing
+git check-ignore -v server/main/xiaozhi-server/data/server.env server/main/xiaozhi-server/data/.config.yaml singing/token.txt singing/config.local.yaml
+```
+
+后两行每个文件都应该显示命中的忽略规则。API Key、Token、对话记录、截图、曲库、翻唱成品和音色模型都不进 Git，也不进 Release。
 
 构建环境和测试命令见 [主 README](../README.md)。验证脚本还依赖项目测试日志，首次发布前
 应先按 README 跑测试。不能只拿旧日志作为新版本测试结果。
@@ -78,6 +93,6 @@ Get-FileHash .\DeepFlipper-v0.1.0-preview.1-esp32s3-n16r8.zip -Algorithm SHA256
 
 Linux 在附件目录中可执行 `sha256sum -c SHA256SUMS.txt`。
 TGZ 直接交给 qFlipper；ESP32 ZIP 先解压，按包内中文说明烧录。
-完整 `merged-binary.bin` 在 **0x0**，会覆盖配置和身份；应用 `xiaozhi.bin` 在 **0x20000**，
+完整 `merged-binary.bin` 在 **0x0**，会覆盖配置和身份；应用 `deepflipper.bin` 在 **0x20000**，
 仅在相同分区、初始 ota_0 槽时使用，不全片擦除可保留 NVS。
 更换完整镜像后重新配网、导出新身份并在服务端重新登记。

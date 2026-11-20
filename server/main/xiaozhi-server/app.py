@@ -6,7 +6,7 @@ import asyncio
 from aioconsole import ainput
 from config.settings import load_config
 from config.logger import setup_logging
-from core.utils.util import get_local_ip, validate_mcp_endpoint
+from core.utils.util import get_local_ip
 from core.voice_runtime import VoiceRuntime
 from core.admin_server import AdminServer
 from config.config_loader import get_project_dir
@@ -65,8 +65,9 @@ async def main():
     # 添加 stdin 监控任务
     stdin_task = asyncio.create_task(monitor_stdin())
 
-    # 预热唤醒词音频编码缓存，让首条连接就命中
-    asyncio.create_task(preheat_wakeup_audio_cache())
+    # 仅在启用唤醒词快速回复时预热其音频编码缓存
+    if config.get("enable_wakeup_words_response_cache", False):
+        asyncio.create_task(preheat_wakeup_audio_cache())
 
     # 启动全局GC管理器（5分钟清理一次）
     gc_manager = get_gc_manager(interval_seconds=300)
@@ -91,18 +92,6 @@ async def main():
         logger.bind(tag=TAG).info(f"Optional HTTP service enabled on port {port}")
     else:
         logger.bind(tag=TAG).info("Voice-only mode: OTA and vision HTTP service disabled")
-
-    mcp_endpoint = config.get("mcp_endpoint", None)
-    if mcp_endpoint is not None and "你" not in mcp_endpoint:
-        # 校验MCP接入点格式
-        if validate_mcp_endpoint(mcp_endpoint):
-            logger.bind(tag=TAG).info("mcp接入点是\t{}", mcp_endpoint)
-            # 将mcp计入点地址转成调用点
-            mcp_endpoint = mcp_endpoint.replace("/mcp/", "/call/")
-            config["mcp_endpoint"] = mcp_endpoint
-        else:
-            logger.bind(tag=TAG).error("mcp接入点不符合规范")
-            config["mcp_endpoint"] = "你的接入点 websocket地址"
 
     # 获取WebSocket配置，使用安全的默认值
     websocket_port = 8000

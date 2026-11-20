@@ -2,7 +2,7 @@
 
 ## Project
 
-XiaoZhi is an ESP-IDF C/C++ voice-assistant firmware supporting many chips, boards, displays, audio devices, and network transports. A build selects exactly one board implementation.
+DeepFlipper's ESP32-S3 voice module firmware: an ESP-IDF C/C++ voice-assistant fork of XiaoZhi. Only the `deepflipper-s3` board (plus `boards/common/`) and the `en-US` locale are kept; a build selects exactly one board implementation. The WebSocket path `/xiaozhi/v1/` is server protocol and stays.
 
 Use the ESP-IDF `release/v6.1` branch when possible. The minimum supported SDK is ESP-IDF v6.0.1. IDF 5.x is not supported.
 
@@ -88,6 +88,5 @@ The build script changes local `sdkconfig` and build state. Do not assume the bu
 - Audio design: `main/audio/README.md`
 - Code style: `docs/code_style.md`
 - Protocols: `docs/websocket.md`, `docs/mqtt-udp.md`, `docs/mcp-protocol.md`
-- CI matrix: `.github/workflows/build.yml`
 
 Keep detailed or fast-changing information in those files, not here. Add a nested `AGENTS.md` only when a subsystem needs specialized instructions.

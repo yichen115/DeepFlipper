@@ -12,7 +12,7 @@ ROOT=Path(__file__).resolve().parents[1]
 assets=ROOT/'assets/whale-girl'
 manifest=json.loads((assets/'manifest.json').read_text(encoding='utf-8'))
 raw=(assets/'whale_frames.bin').read_bytes()
-assert len(raw)==manifest['unique_frame_count']*512==66048
+assert len(raw)==manifest['unique_frame_count']*512==78336
 assert (assets/manifest['source']).is_file()
 base=Image.open(assets/'source/accepted-screen.png').convert('1').crop((0,0,64,64))
 frames=0
@@ -29,11 +29,11 @@ for animation in manifest['animations']:
         assert ImageChops.difference(frame.crop((26,47+bob,36,55+bob)),
                                     base.crop((26,47,36,55))).getbbox() is None
         frames+=1
-assert frames==228 and len(manifest['animations'])==12
+assert frames==260 and len(manifest['animations'])==13
 assert bytes(int(x,16) for x in re.findall(r'0x([0-9a-f]{2})',
              (assets/'whale_animations.h').read_text()))==raw
 
-for file in [ROOT/'README.md',ROOT/'docs/final-spec.zh-CN.md',ROOT/'docs/implementation.md',
+for file in [ROOT/'README.md',ROOT/'README.en.md',ROOT/'docs/final-spec.zh-CN.md',ROOT/'docs/implementation.md',
              assets/'README.zh-CN.md',ROOT/'protocol/README.md',ROOT/'hardware/README.md']:
     text=file.read_text(encoding='utf-8')
     for link in re.findall(r'\]\(([^)]+)\)',text):
@@ -55,9 +55,14 @@ assert (release/'deepflipper/whale_frames.bin').read_bytes()==raw
 assert (ROOT/'firmware/flipper/build/f7-firmware-C/resources/deepflipper/whale_frames.bin').read_bytes()==raw
 for name in ('firmware.dfu','radio.bin','resources.ths','splash.bin','updater.bin'):
     assert (update.parent/name).stat().st_size>0,name
+references_checked=[]
 for repo in ('unleashed-firmware','flipperzero-firmware','xiaozhi-esp32','xiaozhi-esp32-server'):
-    status=subprocess.check_output(['git','-C',str(ROOT.parent/'refer'/repo),'status','--porcelain'],text=True)
+    checkout=ROOT.parent/'refer'/repo
+    if not (checkout/'.git').exists():
+        continue  # reference checkouts are optional on a release machine
+    status=subprocess.check_output(['git','-C',str(checkout),'status','--porcelain'],text=True)
     assert not status,('Reference checkout changed',repo)
+    references_checked.append(repo)
 
 test_log=(ROOT/'build-project-tests.log').read_text(encoding='utf-8',errors='replace')
 test_count=int(re.search(r'^Ran (\d+) tests?',test_log,re.M)[1])
@@ -107,7 +112,7 @@ if esp_result.is_file() and (esp_release/'merged-binary.bin').is_file():
         assert image.is_file() and image.read_bytes()==(ROOT/'firmware/esp32/build'/name).read_bytes()
         assert int(offset,16)>=end
         end=int(offset,16)+image.stat().st_size
-        if name=='xiaozhi.bin':app=(int(offset,16),image.stat().st_size)
+        if name=='deepflipper.bin':app=(int(offset,16),image.stat().st_size)
     assert end<=16*1024*1024 and len(merged)>=end
     table=(esp_release/'partition_table/partition-table.bin').read_bytes()
     app_partition=None
@@ -115,7 +120,7 @@ if esp_result.is_file() and (esp_release/'merged-binary.bin').is_file():
         magic,kind,subtype,offset,size,label,flags=struct.unpack('<HBBII16sI',table[pos:pos+32])
         if magic==0x50AA and kind==0 and offset==app[0]:app_partition=size
     assert app_partition and app[1]<=app_partition
-    app_image=(esp_release/'xiaozhi.bin').read_bytes()
+    app_image=(esp_release/'deepflipper.bin').read_bytes()
     for asset in (ROOT/'firmware/esp32/main/boards/deepflipper-s3/web').iterdir():
         if asset.suffix not in ('.html','.js','.css','.wav'):continue
         assert asset.read_bytes() in app_image, ('Device web asset missing/stale in firmware',asset.name)
@@ -128,7 +133,7 @@ report={
                'radio_address':hex(radio),'radio_gap_bytes':gap,
                'sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),
                'hardware_flashed':False},
-    'assets':{'animations':12,'sequence_frames':frames,'unique_frames':manifest['unique_frame_count'],
+    'assets':{'animations':13,'sequence_frames':frames,'unique_frames':manifest['unique_frame_count'],
               'bytes':len(raw),'per_frame_logo_preserved':True},
     'tests':{'project_python':f'{test_count-test_skipped} passed; {test_skipped} skipped','native_rpc_codec':'passed',
              'native_actions':'passed; simulated transport, not physical hardware',
@@ -139,7 +144,7 @@ report={
              'relevant_upstream_board_tests':'9 passed',
              'broader_upstream_host_run':'140 run; 12 Windows environment errors; 19 skipped'},
     'esp32':esp_report,
-    'references_unchanged':True,
+    'references_unchanged':references_checked or 'not checked (no ../refer checkouts)',
 }
 report['tests']['flipper_memory_coexistence']='passed; production C lifecycle tests with host Furi fixtures; physical NFC/heap unverified'
 report['tests']['network_playback']='passed; production startup/refill and per-turn counters, speech-stop PCM/DMA-tail ordering; new firmware speaker playback still requires flashing'

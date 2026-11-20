@@ -8,13 +8,14 @@
 #include <assets_icons.h>
 
 #include "views/bubble_animation_view.h"
-#include "views/one_shot_animation_view.h"
 #include "animation_storage.h"
 #include "animation_manager.h"
+#include <deepflipper/deepflipper_sprite.h>
 
 #define TAG "AnimationManager"
 
-#define HARDCODED_ANIMATION_NAME   "L1_Tv_128x47"
+// The whale-girl home hides internal idle art; keep one tiny fallback only.
+#define HARDCODED_ANIMATION_NAME   "L1_NoSd_128x49"
 #define NO_SD_ANIMATION_NAME       "L1_NoSd_128x49"
 #define BAD_BATTERY_ANIMATION_NAME "L1_BadBattery_128x47"
 
@@ -36,7 +37,6 @@ struct AnimationManager {
     FuriPubSubSubscription* pubsub_subscription_storage;
     FuriPubSubSubscription* pubsub_subscription_dolphin;
     BubbleAnimationView* animation_view;
-    OneShotView* one_shot_view;
     FuriTimer* idle_animation_timer;
     StorageAnimation* current_animation;
     AnimationManagerInteractCallback interact_callback;
@@ -53,7 +53,6 @@ struct AnimationManager {
     bool blocking_shown_no_db  : 1;
     bool blocking_shown_sd_ok  : 1;
     bool levelup_pending       : 1;
-    bool levelup_active        : 1;
 };
 
 static StorageAnimation*
@@ -66,8 +65,6 @@ static bool animation_manager_check_blocking(AnimationManager* animation_manager
 static bool animation_manager_is_valid_idle_animation(
     const StorageAnimationManifestInfo* info,
     const DolphinStats* stats);
-static void animation_manager_switch_to_one_shot_view(AnimationManager* animation_manager);
-static void animation_manager_switch_to_animation_view(AnimationManager* animation_manager);
 
 void animation_manager_set_context(AnimationManager* animation_manager, void* context) {
     furi_assert(animation_manager);
@@ -194,15 +191,13 @@ bool animation_manager_interact_process(AnimationManager* animation_manager) {
 
     if(animation_manager->levelup_pending) {
         animation_manager->levelup_pending = false;
-        animation_manager->levelup_active = true;
-        animation_manager_switch_to_one_shot_view(animation_manager);
         Dolphin* dolphin = furi_record_open(RECORD_DOLPHIN);
         dolphin_upgrade_level(dolphin);
         furi_record_close(RECORD_DOLPHIN);
-    } else if(animation_manager->levelup_active) {
-        animation_manager->levelup_active = false;
+        // The old dolphin level-up film (~12.6 KB of flash) is gone: the
+        // whale girl cheers on the home screen instead.
+        deepflipper_celebrate();
         animation_manager_start_new_idle(animation_manager);
-        animation_manager_switch_to_animation_view(animation_manager);
     } else if(animation_manager->state == AnimationManagerStateBlocked) {
         bool blocked = animation_manager_check_blocking(animation_manager);
 
@@ -573,37 +568,3 @@ void animation_manager_load_and_continue_animation(AnimationManager* animation_m
     furi_assert(animation_manager->current_animation);
 }
 
-static void animation_manager_switch_to_one_shot_view(AnimationManager* animation_manager) {
-    furi_assert(animation_manager);
-    furi_assert(!animation_manager->one_shot_view);
-    Dolphin* dolphin = furi_record_open(RECORD_DOLPHIN);
-    DolphinStats stats = dolphin_stats(dolphin);
-    furi_record_close(RECORD_DOLPHIN);
-
-    animation_manager->one_shot_view = one_shot_view_alloc();
-    one_shot_view_set_interact_callback(
-        animation_manager->one_shot_view, animation_manager_interact_callback, animation_manager);
-    View* prev_view = bubble_animation_get_view(animation_manager->animation_view);
-    View* next_view = one_shot_view_get_view(animation_manager->one_shot_view);
-    view_stack_remove_view(animation_manager->view_stack, prev_view);
-    view_stack_add_view(animation_manager->view_stack, next_view);
-    if(stats.level == 1) {
-        one_shot_view_start_animation(animation_manager->one_shot_view, &A_Levelup1_128x64);
-    } else if(stats.level == 2) {
-        one_shot_view_start_animation(animation_manager->one_shot_view, &A_Levelup2_128x64);
-    } else {
-        furi_crash();
-    }
-}
-
-static void animation_manager_switch_to_animation_view(AnimationManager* animation_manager) {
-    furi_assert(animation_manager);
-    furi_assert(animation_manager->one_shot_view);
-
-    View* prev_view = one_shot_view_get_view(animation_manager->one_shot_view);
-    View* next_view = bubble_animation_get_view(animation_manager->animation_view);
-    view_stack_remove_view(animation_manager->view_stack, prev_view);
-    view_stack_add_view(animation_manager->view_stack, next_view);
-    one_shot_view_free(animation_manager->one_shot_view);
-    animation_manager->one_shot_view = NULL;
-}

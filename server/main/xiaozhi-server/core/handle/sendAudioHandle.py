@@ -261,6 +261,18 @@ async def _send_audio_with_rate_control(
         send_delay_ms: 自定义发送间隔（毫秒）。
     """
     _prime_after_pause(conn)
+    song_lead = getattr(conn, "song_lead_ms", 0)
+    if song_lead and send_delay_ms <= 0:
+        # 歌曲比说话长得多，一次 Wi-Fi 卡顿就会断：让设备多缓冲一些（不超过设备队列 1.2 s）
+        conn.song_lead_ms = 0
+        rate_controller.lead_cap_ms = max(rate_controller.lead_cap_ms, int(song_lead))
+        rate_controller.lead_step_ms = 15
+
+        async def _singing_face():
+            # 和音频同一个队列：开场白说完、歌声开始时 Flipper 主页换成拿麦克风唱歌
+            await conn.websocket.send(json.dumps({"type": "llm", "text": "singing", "emotion": "singing",
+                                                  "session_id": conn.session_id}))
+        rate_controller.add_message(_singing_face)
     for packet in audio_list:
         if conn.client_abort:
             return
@@ -345,6 +357,11 @@ async def send_tts_message(conn: "ConnectionHandler", state, text=None):
         if hasattr(conn, "audio_rate_controller") and conn.audio_rate_controller:
             conn.audio_rate_controller.stop_sending()
         conn.clearSpeakStatus()
+        # 连续对话／等用户回答：让设备播完后接着听
+        from core.utils import continuous_chat
+        if continuous_chat.wants_listen(conn):
+            message["listen"] = "auto"
+            conn.follow_up_pending = True
 
     # 发送消息到客户端
     await conn.websocket.send(json.dumps(message))

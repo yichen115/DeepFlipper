@@ -5,3 +5,4 @@
 // Never call while an RPC worker is synchronously waiting for Loader.
 bool deepflipper_app_suspend_uart(void);
 bool deepflipper_rpc_profile_enabled(void);
+void deepflipper_set_settings_foreground(void);

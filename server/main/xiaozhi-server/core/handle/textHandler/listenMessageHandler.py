@@ -37,6 +37,8 @@ class ListenTextMessageHandler(TextMessageHandler):
             record_event(conn, 'status', '开始录音')
             # 设备从播放模式切回录音模式,清除所有音频状态和缓冲区
             conn.reset_audio_states()
+            from core.utils import continuous_chat
+            continuous_chat.on_listen_start(conn, conn.client_listen_mode)
         elif msg_json["state"] == "stop":
             record_event(conn, 'status', '收到录音发送请求，正在识别')
             # 收到stop但asr未初始化，跳过处理

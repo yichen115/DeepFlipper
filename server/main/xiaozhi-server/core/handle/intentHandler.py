@@ -212,7 +212,7 @@ async def process_intent_result(
                         text = result.response if result.response else result.result
                         if text is not None:
                             speak_txt(conn, text)
-                    elif function_name != "play_music":
+                    else:
                         # For backward compatibility with original code
                         # 获取当前最新的文本索引
                         text = result.response

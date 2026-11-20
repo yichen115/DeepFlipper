@@ -16,7 +16,7 @@ FLASH_FILES = {
     "0x0": "bootloader/bootloader.bin",
     "0x8000": "partition_table/partition-table.bin",
     "0xd000": "ota_data_initial.bin",
-    "0x20000": "xiaozhi.bin",
+    "0x20000": "deepflipper.bin",
 }
 UPDATE_FILES = ("firmware.dfu", "radio.bin", "resources.ths", "splash.bin",
                 "update.fuf", "updater.bin")
@@ -94,7 +94,7 @@ python -m esptool --chip esp32s3 --port COM42 --baud 460800 write-flash 0x0 merg
 仅当分区相同且仍使用初始 ota_0 槽时，可保留 NVS 升级应用：
 
 ```powershell
-python -m esptool --chip esp32s3 --port COM42 --baud 460800 write-flash 0x20000 xiaozhi.bin
+python -m esptool --chip esp32s3 --port COM42 --baud 460800 write-flash 0x20000 deepflipper.bin
 ```
 
 不要全片擦除。OTA 选槽改变或不确定时使用完整安装，然后重新配网、导出身份，
@@ -189,23 +189,26 @@ def package(root, version, allow_dirty=False):
                    if state["dirty"] else "发布前请确认固件由所选提交重新构建；打包时源码指纹不是构建时证明。\n\n")
         notes = f"""# DeepFlipper {version}
 
-{preview}鲸鱼娘系统桌面 + ESP32-S3 语音与配置网页 + Python 模型管理后台。
-提供硬件工具、对话上下文、红外学习／Sub-GHz RAW 采集和音频对比试听。
-手动启动正常应用前回收 AI 后台栈和 UART RPC 资源，退出后恢复；用于缓解 NFC 等应用内存不足。
-对话音频加入首包接收保护、启动缓冲和每轮诊断；服务端区分上下行采样率并提供同样本流式／缓冲对比。
-流式音频使用 480ms 启动／断粮恢复缓冲，TTS 编码器每轮同步重置；尾部等 PCM／I2S 排空后再切省电。
+{preview}鲸鱼娘系统桌面 + ESP32-S3 语音与配置网页 + Python 模型管理后台 + 可选的本机 RVC 唱歌服务。
+
+- AI 像人一样操作 Flipper：打开应用、按键、读屏和截图；发送／模拟／写入／删除前确认一次。
+- 可选连续对话：按一次键说话，回答后接着听，一段时间没说话自动停（管理页开关，默认关）。
+- 点歌：本地曲库（可多个目录）或链接下载，没练过的歌先练，练好后主动询问；主页有练歌／唱歌动画。
+- 对话记录按聊天显示，包含每一步操作和当时的屏幕截图。
+- 鲸鱼娘宠物 App、主页同步宠物状态；AI 开启时锁住 5V，Sub-GHz 等应用不会断开模块供电。
 完整能力和限制以对应版本 README 为准，不代表所有菜单均能由 AI 控制。
 
-- Flipper F7：qFlipper → Install from file，选 `{fz_name}`；TGZ 包含 SD 资源与工具 FAP。
+- Flipper F7：qFlipper → Install from file，选 `{fz_name}`；TGZ 包含 SD 动画、宠物 App、工具 FAP 和登记文件。
 - ESP32-S3 N16R8：解压 `{esp_name}`，按中文说明烧录。完整镜像 0x0 会重置配置；
   仅升级应用 0x20000 限相同分区和初始 ota_0 槽，保留 NVS。
-- 服务端：对应源码运行 Docker Compose，8000 语音／8001 本机管理；模型权重另行下载。
+- 服务端：对应源码运行 Docker Compose，8000 语音／8001 本机管理；语音识别／合成模型用 scripts/download_models.py 下载。
+- 唱歌（可选）：Windows + NVIDIA 显卡运行 singing/，见 singing/README.zh-CN.md；不附带音色模型，需要自己训练。
 - 校验下载文件：对照 SHA256SUMS.txt。
 
 构建报告中的固件哈希已核对；软件编译和模拟结果不等于实机验证。
 新增硬件采集、续航和扬声器效果需实机确认，不保证特定卡片／无线目标兼容。
 源码 HEAD：`{state['head']}`；dirty：`{str(state['dirty']).lower()}`。
-本目录不含模型、SDK、ELF、设备 Token、Wi-Fi 密码或服务器私有配置。
+本目录不含模型、音色、曲库、SDK、ELF、设备 Token、API Key、Wi-Fi 密码或服务器私有配置。
 """
         (stage / "RELEASE_NOTES.md").write_text(notes, encoding="utf-8")
         sums = "".join(f"{sha(p.read_bytes())}  {p.name}\n" for p in sorted(stage.iterdir()))

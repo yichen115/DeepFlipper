@@ -3,6 +3,7 @@
 
 #include <furi.h>
 #include <furi_hal.h>
+#include <furi_hal_power_i.h>
 
 #include <update_util/update_operation.h>
 #include <notification/notification_messages.h>
@@ -544,7 +545,9 @@ static void power_message_callback(FuriEventLoopObject* object, void* context) {
         power_settings_apply(power);
         break;
     case PowerMessageTypeSwitchOTG:
-        power->is_otg_requested = *msg.bool_param;
+        // An app turning its module off must not drop an accessory that holds the rail;
+        // keep the request so the rail is restored after USB is unplugged, as before.
+        power->is_otg_requested = *msg.bool_param || furi_hal_power_is_otg_held();
         if(power->is_otg_requested) {
             // Only try to enable if VBUS voltage is low, otherwise charger will refuse
             if(power->info.voltage_vbus < 4.5f) {
@@ -615,6 +618,8 @@ static void power_tick_callback(void* context) {
     // Check OTG status, disable in case of a fault
     if(furi_hal_power_check_otg_fault()) {
         FURI_LOG_E(TAG, "OTG fault detected, disabling OTG");
+        // Overload or short: safety wins over any accessory hold.
+        furi_hal_power_otg_hold(false);
         furi_hal_power_disable_otg();
         power->is_otg_requested = false;
     }

@@ -56,6 +56,36 @@ device-token*.txt
 admin-token*.txt
 deepflipper-connection*.json
 deepflipper-identity*.json
+# Machine-local overrides (personal paths such as the music library) and keys/certificates
+config.local.yaml
+*.local.yaml
+*.pem
+*.key
+*.p12
+*.pfx
+# Local databases: conversation history, caches
+*.sqlite
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.db
+!firmware/**/*.db
+# Root-level editor settings (upstream firmware keeps its documented .vscode examples)
+/.vscode/
+/.idea/
+/.claude/
+
+# Singing worker (Windows GPU): environment, models, songs, renders, training and its shared token.
+# singing/.gitignore lists the same; repeated here so a moved/copied worker stays covered.
+/singing/venv/
+/singing/songs_in/*
+!/singing/songs_in/.gitkeep
+/singing/cache/
+/singing/dataset/
+/singing/training/
+/singing/token.txt
+/singing/worker.log
+# Conversation screenshots and played songs live under the server data/ directory (ignored below).
 
 # Flipper generated files (retain source assets, including whale_frames.bin)
 /firmware/flipper/toolchain/
@@ -63,6 +93,7 @@ deepflipper-identity*.json
 /firmware/flipper/dist/
 /firmware/flipper/assets/compiled/
 /firmware/flipper/applications/services/deepflipper/resources/apps/
+/firmware/flipper/applications/services/deepflipper/resources/deepflipper/apps/
 /firmware/flipper/fbt_options_local.py
 .sconsign.dblite
 compile_commands.json
@@ -80,6 +111,7 @@ compile_commands.json
 
 # Generated distributable; original images, frames and runtime .bin stay tracked.
 /assets/whale-girl/whale-girl-assets.zip
+/assets/whale-pet/frames/
 
 # Upstream issue/support metadata; DeepFlipper can own a root .github/ separately.
 # Keep workflow sources: ESP32 build/CI selection scripts reference build.yml.

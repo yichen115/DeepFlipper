@@ -121,32 +121,15 @@ CONFIG: dict = _load_via_file_merge()
 
 
 # ---------------------------------------------------------------------------
-# 关键：把 ``load_config`` / ``get_server_config`` 等运行时配置入口替换成
-# 直接返回我们已构建的 CONFIG，避免 ``config.config_loader.load_config`` 在
-# 测试运行期间再次读取 ``data/.config.yaml``（默认是全模块部署配置）并触发
-# manager-api 远程调用。
+# 关键：把 ``load_config`` 替换成直接返回我们已构建的 CONFIG，避免测试期间
+# 再次读取 ``data/.config.yaml``。
 # ---------------------------------------------------------------------------
 async def _load_config_patched(*_args, **_kwargs):
     return CONFIG
 
 
-async def _get_server_config_patched(*_args, **_kwargs):
-    return None
-
-
-def _init_service_noop(_config):
-    """阻止 ``init_service`` 实例化 ``ManageApiClient``。"""
-    return None
-
-
 import config.config_loader as _cl  # noqa: E402
-import config.manage_api_client as _mac  # noqa: E402
 _cl.load_config = _load_config_patched
-_mac.init_service = _init_service_noop
-_mac.get_server_config = _get_server_config_patched
-# 清空 ManageApiClient 单例，避免前面已经被其它代码触发过实例化。
-_mac.ManageApiClient._instance = None
-_mac.ManageApiClient._closed = True
 
 
 # ---------------------------------------------------------------------------
@@ -212,32 +195,18 @@ _MOCKED_MODULES: tuple[str, ...] = (
     # 注：openai / httpx / requests 这些真实第三方包通常已装在 conda 环境，
     # shim 整个 module 会破坏 ``openai.types`` / ``httpx.AsyncClient`` 等子模块
     # 解析。仅当对应包没装时才 shim（__getattr__ 仍走真 import 路径）。
-    "anthropic",
-    "dashscope",
-    "tencentcloud",
-    "xunfei",
-    "vosk",
     "edge_tts",
-    "elevenlabs",
-    "mem0",
-    "mem0ai",
     "freezegun",
 )
 
-# 这些包即使装了也强制 shim — 它们要么本地模型链 import 时炸
-# (funasr 引 torch、torch DLL 路径长)，要么是 GPU 重型依赖，mock 跑不动。
-_FORCE_SHIM_MODULES: tuple[str, ...] = (
-    "funasr",
-    "torch",
-    "torchaudio",
-    "modelscope",
-)
+# 这些包即使装了也强制 shim（DeepFlipper 已不再依赖 PyTorch 系列，保留为空）。
+_FORCE_SHIM_MODULES: tuple[str, ...] = ()
 
 
 def _try_import_real(name: str) -> bool:
     """检查真实第三方包是否可加载（不真正 import，只检查 importer.find_spec）。
 
-    主动 ``__import__`` 会触发包级副作用（funasr 引 torch 等），绕过它直接
+    主动 ``__import__`` 会触发包级副作用，绕过它直接
     看包是否在 sys.path / site-packages 里。
     """
     import importlib.util

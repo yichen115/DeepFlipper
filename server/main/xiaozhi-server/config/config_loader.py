@@ -49,18 +49,56 @@ def merge_local_config(default_config, custom_config):
     config = merge_configs(default_config, custom_config)
     config.pop("manager-api", None)
     config["read_config_from_api"] = False
+    migrate_asr_selection(config, custom_config)
     if TOOL_POLICY not in config.get("prompt", ""):
         config["prompt"] = config.get("prompt", "") + "\n\n" + TOOL_POLICY
     return config
 
 
+DEFAULT_ASR = "SherpaASR"
+DEFAULT_ASR_CONFIG = {
+    "type": "sherpa_onnx_local",
+    "model_dir": "models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17",
+    "model_type": "sense_voice",
+    "language": "auto",
+    "num_threads": 2,
+    "output_dir": "tmp/",
+}
+
+
+def _asr_provider_exists(provider_type):
+    if not isinstance(provider_type, str) or not provider_type.isidentifier():
+        return False
+    path = os.path.join(get_project_dir(), "core", "providers", "asr", provider_type + ".py")
+    return os.path.isfile(path)
+
+
+def migrate_asr_selection(config, custom_config=None):
+    """Old configs select the removed PyTorch FunASR provider; fall back to SherpaASR."""
+    selected = config.get("selected_module")
+    if not isinstance(selected, Mapping):
+        return
+    name = selected.get("ASR")
+    if not name:
+        return
+    providers = config.get("ASR") if isinstance(config.get("ASR"), Mapping) else {}
+    entry = providers.get(name)
+    if isinstance(entry, Mapping) and _asr_provider_exists(entry.get("type", name)):
+        return
+    custom_asr = (custom_config or {}).get("ASR") or {}
+    custom_sherpa = custom_asr.get(DEFAULT_ASR) if isinstance(custom_asr, Mapping) else None
+    sherpa = dict(DEFAULT_ASR_CONFIG)
+    sherpa.update(providers.get(DEFAULT_ASR) or {})
+    # Keep a language restriction the user chose for the old provider (e.g. zh).
+    if (isinstance(entry, Mapping) and entry.get("language")
+            and not (isinstance(custom_sherpa, Mapping) and "language" in custom_sherpa)):
+        sherpa["language"] = entry["language"]
+    config["ASR"] = {**providers, DEFAULT_ASR: sherpa}
+    config["selected_module"] = {**selected, "ASR": DEFAULT_ASR}
+
+
 async def reload_local_config():
     return await load_config(force=True)
-
-
-async def get_private_config_from_api(config, device_id, client_id):
-    # Compatibility import for inherited connection code; this mode is never enabled.
-    raise RuntimeError("Per-device Java manager configuration is not supported")
 
 
 def ensure_directories(config):

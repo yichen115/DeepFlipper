@@ -25,6 +25,10 @@ class AudioRateController:
         self.interval_ms = send_delay if send_delay > 0 else frame_duration
         self._custom_delay = send_delay > 0
         self._lead_ms = 0
+        # 每包提前几毫秒发，累计到 lead_cap_ms 为止：设备多缓冲一点，抗 Wi-Fi 抖动。
+        # 唱歌时调大（见 sendAudioHandle.song_lead），新句子 reset() 恢复默认。
+        self.lead_cap_ms = 360
+        self.lead_step_ms = 4
         self.queue = deque()
         self.play_position = 0  # 虚拟播放位置（毫秒）
         self.start_timestamp = None  # 开始时间戳（只读，不修改）
@@ -44,6 +48,8 @@ class AudioRateController:
         self.queue.clear()
         self.play_position = 0
         self._lead_ms = 0
+        self.lead_cap_ms = 360
+        self.lead_step_ms = 4
         self.start_timestamp = None  # 由首个音频包设置
         self._last_queue_empty_time = 0  # 重置时间
         # 相关事件处理
@@ -156,8 +162,8 @@ class AudioRateController:
 
                 # 时间已到，从队列移除并发送
                 self.queue.popleft()
-                if not self._custom_delay and self._lead_ms < 360:
-                    step_ms = max(1, self.interval_ms - 4)
+                if not self._custom_delay and self._lead_ms < self.lead_cap_ms:
+                    step_ms = max(1, self.interval_ms - self.lead_step_ms)
                     self._lead_ms += self.interval_ms - step_ms
                 else:
                     step_ms = self.interval_ms

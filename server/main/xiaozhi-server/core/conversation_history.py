@@ -3,14 +3,23 @@ from functools import lru_cache
 from contextlib import contextmanager
 from pathlib import Path
 import asyncio
+import json
 import logging
 import queue
+import re
 import sqlite3
 import threading
 import time
+import uuid
 
 LOG = logging.getLogger(__name__)
-KINDS = {'user', 'assistant', 'status', 'error'}
+KINDS = {'user', 'assistant', 'status', 'error', 'tool'}
+IMAGE_NAME = re.compile(r'^[0-9a-f]{32}\.png$')
+MAX_IMAGES = 400
+# Tool arguments worth showing; anything else (and any value that looks like a secret) is dropped.
+SHOWN_ARGS = ('name', 'key', 'keys', 'text', 'press_type', 'bitmap', 'confirm', 'kind', 'path', 'button',
+              'action', 'app', 'song', 'url', 'frequency', 'timeout_ms', 'keep_open', 'pin', 'value', 'rpc_mode')
+SECRET = re.compile(r'(token|secret|password|api[_-]?key)', re.I)
 
 
 class ConversationHistory:
@@ -18,6 +27,8 @@ class ConversationHistory:
         self.path = Path(path)
         self.retention = retention
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Screenshots shown next to tool steps; named by random id, never by device (":" is not NTFS-safe).
+        self.images = self.path.parent / 'history_images'
         self.pending = queue.Queue(maxsize=512)
         self.failed = False
         self.lock = threading.RLock()
@@ -53,10 +64,14 @@ class ConversationHistory:
         """Delete a scope and invalidate queued events/old connections atomically."""
         with self.write_lock:
             with self.connect() as db:
-                if device is None:
-                    deleted = db.execute('DELETE FROM events').rowcount
-                else:
-                    deleted = db.execute('DELETE FROM events WHERE device = ?', (device,)).rowcount
+                scope = '' if device is None else ' WHERE device = ?'
+                args = () if device is None else (device,)
+                images = [self._image_of(text) for (text,) in
+                          db.execute("SELECT text FROM events" + (scope + " AND" if scope else " WHERE") +
+                                     " kind = 'tool'", args)]
+                deleted = db.execute('DELETE FROM events' + scope, args).rowcount
+            for name in images:
+                self._remove_image(name)
             with self.lock:
                 if device is None:
                     self.generation += 1
@@ -64,6 +79,46 @@ class ConversationHistory:
                 else:
                     self.device_generations[device] = self.device_generations.get(device, 0) + 1
             return deleted
+
+    # ------------------------------------------------------------ screenshots
+    @staticmethod
+    def _image_of(text):
+        try:
+            name = json.loads(text).get('image')
+        except (ValueError, TypeError, AttributeError):
+            return None
+        return name if isinstance(name, str) and IMAGE_NAME.match(name) else None
+
+    def _remove_image(self, name):
+        if name and IMAGE_NAME.match(name):
+            try:
+                (self.images / name).unlink()
+            except OSError:
+                pass
+
+    def save_image(self, png):
+        """Store one PNG for a tool event; keep at most MAX_IMAGES, oldest removed first."""
+        if not isinstance(png, (bytes, bytearray)) or not png.startswith(b'\x89PNG') or len(png) > 256 * 1024:
+            return None
+        name = uuid.uuid4().hex + '.png'
+        try:
+            self.images.mkdir(parents=True, exist_ok=True)
+            tmp = self.images / (name + '.tmp')
+            tmp.write_bytes(png)
+            tmp.replace(self.images / name)
+            files = sorted(self.images.glob('*.png'), key=lambda p: p.stat().st_mtime)
+            for old in files[:-MAX_IMAGES]:
+                old.unlink()
+        except OSError:
+            LOG.warning('Conversation screenshot write failed')
+            return None
+        return name
+
+    def image_path(self, name):
+        if not isinstance(name, str) or not IMAGE_NAME.match(name):
+            return None
+        path = self.images / name
+        return path if path.is_file() else None
 
     def append(self, device, client, session, kind, text, revision=None):
         if kind not in KINDS or not isinstance(text, str) or not text.strip():
@@ -162,11 +217,84 @@ def record_event(conn, kind, text):
                        revision=getattr(conn, 'history_revision', None))
 
 
+def _shown_args(arguments):
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments or '{}')
+        except ValueError:
+            return {}
+    if not isinstance(arguments, dict):
+        return {}
+    shown = {}
+    for key in SHOWN_ARGS:
+        value = arguments.get(key)
+        if value is None or SECRET.search(key) or isinstance(value, (dict, list)):
+            continue
+        if isinstance(value, str):
+            if SECRET.search(value):
+                continue
+            value = value[:120]
+        shown[key] = value
+    return shown
+
+
+def tool_summary(name, arguments, result, png_name=None):
+    """What the transcript keeps for one tool step: name, chosen arguments, outcome, screen."""
+    event = {'name': str(name or '')[:64], 'args': _shown_args(arguments)}
+    data = None
+    if isinstance(result, str):
+        try:
+            data = json.loads(result)
+        except ValueError:
+            event['result'] = result[:300]
+    elif result is not None:
+        event['result'] = str(result)[:300]
+    if isinstance(data, dict):
+        inner = data.get('result') if isinstance(data.get('result'), dict) else data
+        ok = inner.get('ok', data.get('ok'))
+        if isinstance(ok, bool):
+            event['ok'] = ok
+        code = inner.get('code') or inner.get('error') or data.get('code')
+        if isinstance(code, str):
+            event['code'] = code[:64]
+        for key in ('app', 'view', 'selected'):
+            if isinstance(inner.get(key), str):
+                event[key] = inner[key][:800]
+        if isinstance(inner.get('action'), str):
+            event['action'] = inner['action'][:64]
+        if 'view' not in event and 'code' not in event:
+            event['result'] = json.dumps(data, ensure_ascii=False)[:300]
+    elif data is not None:
+        event['result'] = str(data)[:300]
+    if png_name:
+        event['image'] = png_name
+    return event
+
+
+def record_tool(conn, name, arguments, result, png=None):
+    """Keep one Flipper/plugin step (and its screenshot) in the transcript for the admin page."""
+    history = getattr(conn, 'conversation_history', None)
+    if not history or getattr(conn, 'history_cleared', False):
+        return
+    try:
+        image = history.save_image(png) if png else None
+        event = tool_summary(name, arguments, result, image)
+        record_event(conn, 'tool', json.dumps(event, ensure_ascii=False))
+    except Exception:
+        LOG.warning('Conversation tool event omitted', exc_info=True)
+
+
 def record_message(conn, message):
     # Provider credentials, system prompts, few-shot examples and raw tool
     # arguments/results are deliberately outside the conversation transcript.
     if message.role in ('user', 'assistant') and not message.is_temporary and message.content:
-        record_event(conn, message.role, message.content)
+        text = message.content
+        if not isinstance(text, str):
+            # Multimodal list content: keep the text parts, never the image data.
+            from core.utils.dialogue import content_text
+            text = content_text(text, image_placeholder='[截图]')
+        if text:
+            record_event(conn, message.role, text)
 
 
 async def clear_conversations(history, runtime, device=None):

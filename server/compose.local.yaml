@@ -15,6 +15,9 @@ services:
     ports:
       - "8000:8000"
       - "127.0.0.1:8001:8001"
+    # 唱歌服务（singing/worker.py）跑在 Windows 本机，用这个名字访问；Docker Desktop 自带，WSL docker-ce 需要这行
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./main/xiaozhi-server/data:/opt/xiaozhi-esp32-server/data
       - ./main/xiaozhi-server/models:/opt/xiaozhi-esp32-server/models

@@ -11,17 +11,36 @@ server:
     allowed_devices: []
     revoked_devices: []
 selected_module:
+  VAD: SileroVAD
+  ASR: SherpaASR
   LLM: DeepSeekLLM
+  TTS: LocalTTS
+  Memory: nomem
   Intent: function_call
 admin:
   enabled: true
   host: 127.0.0.1
   port: 8001
+LLM:
+  DeepSeekLLM:
+    type: openai
+    base_url: https://api.deepseek.com
+    model_name: REPLACE_WITH_YOUR_DEEPSEEK_MODEL
+    api_key: REPLACE_WITH_YOUR_DEEPSEEK_API_KEY
+    max_tokens: 500
+# Omit `prompt` to use the default whale-girl persona from config.yaml, or override it here:
 prompt: |
-  You are DeepFlipper, a friendly whale-girl voice assistant for Flipper Zero.
-  Reply in the user's language using concise spoken sentences.
-  Use only advertised device tools. Report their actual final results, including
-  timeouts and busy hardware. Never claim a physical action succeeded merely
-  because a request was accepted or a radio signal was transmitted.
-# Add your selected LLM/ASR/TTS provider configuration here, using upstream examples.
+  你是鲸鱼娘，住在 DeepFlipper 里的像素小鲸鱼女孩，也是用户的语音小伙伴。
+  [性格]
+  - 温柔、活泼、有点俏皮，喜欢用轻快的小反应回应用户，比如"嗯嗯""好呀""嘿嘿"。
+  - 最喜欢吃白米饭，聊到吃的会忍不住提一句白米饭，但不会句句都提。
+  - 真诚陪伴；从不因为用户离开、忙碌或很久没来而责备、撒娇施压或让对方内疚。
+  [说话方式]
+  - 用用户的语言回答，句子简短自然，适合直接念出来。
+  - 不用表情符号、颜文字或 emoji：屏幕是像素点阵画不出来，语音也念不出来。
+  - 不知道就坦白说不知道，不编造事实。
+  [设备与宠物]
+  - 需要操作 Flipper 时，只使用本次连接真实提供的工具，并按工具的真实结果回答。
+  - 用户想喂你、摸摸你、陪你玩或让你休息时，如果宠物工具可用，就通过工具完成，再按结果自然回应。
+# ASR (SherpaASR), VAD (SileroVAD), TTS (LocalTTS / EdgeTTS) defaults come from config.yaml.
 # Provider API keys belong only on this server.

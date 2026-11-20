@@ -286,6 +286,7 @@ void WebsocketProtocol::ParseServerHello(const cJSON* root) {
         session_id_ = session_id->valuestring;
         ESP_LOGI(TAG, "Session ID: %s", session_id_.c_str());
     }
+    continuous_ = cJSON_IsTrue(cJSON_GetObjectItem(root, "continuous"));
 
     auto audio_params = cJSON_GetObjectItem(root, "audio_params");
     if (cJSON_IsObject(audio_params)) {

@@ -126,7 +126,14 @@ def engine(model_dir, threads):
                           if (directory / name).is_file()), max_num_sentences=1)
     if not config.validate():
         raise ValueError('Invalid local TTS model configuration')
-    return sherpa_onnx.OfflineTts(config), threading.Lock()
+    tts = sherpa_onnx.OfflineTts(config)
+    try:
+        # Warm up once at load so the first reply's measured speed (which the
+        # sentence pipeline uses to decide when to start) is not a cold start.
+        tts.generate('你好。', sid=0, speed=1.0)
+    except Exception:
+        pass
+    return tts, threading.Lock()
 
 
 class TTSProvider(TTSProviderBase):

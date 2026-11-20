@@ -67,6 +67,15 @@ int main() {
     std::cerr << "FAIL: RPC/heartbeat/status transmit frames interleaved\n";
     return 1;
   }
+  dfcompanion::VoiceLinkGrace grace;
+  assert(!grace.ShouldSuspend(9000)); // No UART link had been established yet.
+  grace.Lost(10000);
+  assert(!grace.ShouldSuspend(14999));
+  grace.Recovered();
+  assert(!grace.ShouldSuspend(15000));
+  grace.Lost(16000);
+  assert(grace.ShouldSuspend(21000));
+  assert(!grace.ShouldSuspend(22000));
   dfcompanion::Updates updates;
   int polls = 0, uis = 0, reports = 0;
   for (int64_t ms = 0; ms <= 600000; ms += 50) {

@@ -165,7 +165,7 @@ async def send_mcp_initialize_message(conn: "ConnectionHandler"):
             "protocolVersion": "2024-11-05",
             "capabilities": capabilities,
             "clientInfo": {
-                "name": "XiaozhiClient",
+                "name": "DeepFlipperServer",
                 "version": "1.0.0",
             },
         },

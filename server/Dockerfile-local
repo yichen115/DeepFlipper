@@ -10,11 +10,8 @@ RUN sed -i "s|http://deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/
 WORKDIR /opt/xiaozhi-esp32-server
 ENV PYTHONUNBUFFERED=1 PYTHONIOENCODING=utf-8 LANG=C.UTF-8
 
-# Select CPU wheels first so the shared requirements do not pull CUDA libraries.
+# All speech models run on onnxruntime / sherpa-onnx (CPU); no PyTorch wheels needed.
 RUN --mount=type=cache,target=/root/.cache/pip pip install --upgrade pip setuptools wheel
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install torch==2.2.2+cpu torchaudio==2.2.2+cpu \
-    --extra-index-url https://download.pytorch.org/whl/cpu
 COPY main/xiaozhi-server/requirements.txt ./requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements.txt
 COPY main/xiaozhi-server ./

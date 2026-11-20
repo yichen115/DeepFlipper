@@ -8,7 +8,7 @@ import unittest
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'server/main/xiaozhi-server'))
-HAS_RUNTIME=all(importlib.util.find_spec(name) for name in ('funasr','opuslib_next'))
+HAS_RUNTIME=all(importlib.util.find_spec(name) for name in ('sherpa_onnx','opuslib_next'))
 if HAS_RUNTIME:
     from core.handle.sendAudioHandle import sendAudio, PRE_BUFFER_COUNT, _prime_after_pause
 

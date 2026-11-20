@@ -6,7 +6,7 @@
 #include <string.h>
 typedef struct {bool enabled,foreground;} Snapshot;
 typedef struct {int unused;} Thread;
-typedef struct {void* link_mutex;Snapshot snapshot;bool uart_suspended,worker_stop;Thread* thread;} DeepFlipper;
+typedef struct {void* link_mutex;Snapshot snapshot;bool uart_suspended,worker_stop,settings_foreground;Thread* thread;} DeepFlipper;
 typedef struct {int unused;} Rpc;
 typedef struct {int unused;} Expansion;
 static DeepFlipper state,*service=&state;
@@ -57,19 +57,34 @@ static const char* furi_thread_get_name(void* id){(void)id;return caller_name;}
 #include "assistant-finish-production.inc"
 #include "loader-prepare-production.inc"
 #include "loader-caller-production.inc"
+#include "loader-keep-production.inc"
 int main(void){
+    // Assistant pages keep the link; every other local launch still releases it.
+    assert(loader_deepflipper_keeps_link("deepflipper_settings",NULL));
+    assert(loader_deepflipper_keeps_link(NULL,"/ext/apps/Games/whale_pet.fap"));
+    assert(loader_deepflipper_keeps_link(NULL,"/any/apps/Games/whale_pet.fap"));
+    assert(!loader_deepflipper_keeps_link("subghz","Sub-GHz"));
+    assert(!loader_deepflipper_keeps_link(NULL,"/ext/apps/Games/whale_pet.fap.bak"));
+    assert(!loader_deepflipper_keeps_link(NULL,"/ext/apps/Tools/whale_pet.fap"));
+    assert(!loader_deepflipper_keeps_link(NULL,"/int/apps/Games/whale_pet.fap"));
+    assert(!loader_deepflipper_keeps_link(NULL,NULL));
     service=NULL;assert(!deepflipper_rpc_profile_enabled());service=&state;
     assert(!deepflipper_rpc_profile_enabled());
     caller_name="Desktop";assert(!loader_caller_is_rpc());
     caller_name=RPC_SESSION_THREAD_NAME;assert(loader_caller_is_rpc());
     service->snapshot.enabled=true;
     assert(deepflipper_rpc_profile_enabled());
-    assert(loader_prepare_deepflipper(true,NULL));assert(disabled==0); // RPC app.open without args.
-    rpc_argument=true;assert(loader_prepare_deepflipper(false,"RPC 1234"));assert(disabled==0);
+    assert(loader_prepare_deepflipper(true,NULL,false));assert(disabled==0); // RPC app.open without args.
+    rpc_argument=true;assert(loader_prepare_deepflipper(false,"RPC 1234",false));assert(disabled==0);
     rpc_argument=false;
+    assert(loader_prepare_deepflipper(false,NULL,true));
+    assert(service->snapshot.foreground&&service->settings_foreground&&!service->uart_suspended);
+    assert(disabled==0);
+    deepflipper_app_finished();
+    assert(!service->settings_foreground&&!service->snapshot.foreground);
     for(int i=0;i<100;i++){
         deepflipper_worker_start();assert(worker_stacks==1);
-        assert(loader_prepare_deepflipper(false,NULL));assert(service->uart_suspended);
+        assert(loader_prepare_deepflipper(false,NULL,false));assert(service->uart_suspended);
         assert(worker_stacks==0&&service->thread==NULL);
         int before=resumed;deepflipper_resume_uart();assert(resumed==before); // Local app still running.
         deepflipper_app_finished();assert(worker_stacks==1);
@@ -78,15 +93,15 @@ int main(void){
         assert(!service->uart_suspended&&records==0&&barrier_depth==0);
     }
     int before=disabled;
-    command_busy=true;assert(!loader_prepare_deepflipper(false,NULL));
+    command_busy=true;assert(!loader_prepare_deepflipper(false,NULL,false));
     assert(disabled==before&&!service->uart_suspended&&records==0); // No Loader/RPC deadlock.
     deepflipper_app_finished();assert(worker_stacks==1); // Failed launch restores animation worker.
-    command_busy=false;prepare_ok=false;assert(!loader_prepare_deepflipper(false,NULL));
+    command_busy=false;prepare_ok=false;assert(!loader_prepare_deepflipper(false,NULL,false));
     assert(disabled==before);prepare_ok=true;
-    assert(loader_prepare_deepflipper(false,NULL));
+    assert(loader_prepare_deepflipper(false,NULL,false));
     service->snapshot.enabled=false;service->snapshot.foreground=false;
     before=resumed;deepflipper_resume_uart();assert(resumed==before); // AI off cannot reconnect.
-    assert(loader_prepare_deepflipper(false,NULL));assert(records==0);
+    assert(loader_prepare_deepflipper(false,NULL,false));assert(records==0);
     deepflipper_worker_start();deepflipper_worker_start();assert(worker_stacks==1);
     deepflipper_worker_stop();deepflipper_worker_stop();assert(worker_stacks==0);
     puts("PASS: actual local-app UART release/resume, remote launch preservation, AI-off and busy admission");

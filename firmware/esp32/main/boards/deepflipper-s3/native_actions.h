@@ -1,9 +1,13 @@
 #pragma once
 #include <cJSON.h>
+#include <algorithm>
 #include <functional>
 #include <memory>
+#include "../../../../flipper/lib/deepflipper_app/json_limits.h"
+#include "app_catalog.h"
 #include "native_policy.h"
 #include "rpc_wire.h"
+#include "screen_view.h"
 
 namespace dfnative {
 struct Reply {
@@ -27,6 +31,15 @@ public:
     virtual bool AppRunning() const = 0;
     virtual std::string AppName() const = 0;
     virtual void SetAppName(const std::string& name) = 0;
+    virtual std::string RetainedApp() const = 0;
+    virtual int64_t RetainedDeadline() const = 0;
+    virtual void RetainApp(const std::string& name, int64_t deadline) = 0;
+    // DeepFlipper companion JSON request (session added by the transport).
+    virtual std::string Companion(const std::string& request, int timeout_ms) {
+        (void)request;
+        (void)timeout_ms;
+        return "{\"ok\":false,\"code\":\"unsupported\"}";
+    }
 };
 class Actions {
     Transport& transport_;
@@ -49,6 +62,15 @@ class Actions {
 public:
     Actions(Transport& transport, int64_t deadline_ms)
         : transport_(transport), deadline_ms_(deadline_ms) {}
+    std::string ExpireRetained() {
+        if (transport_.RetainedApp().empty() || transport_.NowMs() < transport_.RetainedDeadline())
+            return {};
+        auto result = Execute("native.app.exit", "{}");
+        // An unconfirmed lease cleanup must trigger the existing session-close fallback.
+        if (!transport_.RetainedApp().empty())
+            transport_.Reset();
+        return result;
+    }
     std::string Execute(const std::string& op, const std::string& args_json) {
         using Json = std::unique_ptr<cJSON, decltype(&cJSON_Delete)>;
         Json args(cJSON_Parse(args_json.c_str()), cJSON_Delete),
@@ -57,6 +79,9 @@ public:
         auto finish = [&]() { return Serialize(out); };
         auto error = [&](const std::string& code, const char* stage = "request") {
             cJSON_DeleteItemFromObject(out, "ok");
+            cJSON_DeleteItemFromObject(out, "code");
+            cJSON_DeleteItemFromObject(out, "stage");
+            cJSON_DeleteItemFromObject(out, "state");
             cJSON_AddBoolToObject(out, "ok", false);
             cJSON_AddStringToObject(out, "code", code.c_str());
             cJSON_AddStringToObject(out, "stage", stage);
@@ -137,8 +162,10 @@ public:
                 if (!lock.error.empty() || lock.status || lock.message.tag != 18 ||
                     !number(lock.message, 1, busy))
                     return false;
-                if (!busy)
+                if (!busy) {
+                    transport_.RetainApp("", 0);
                     return true;
+                }
                 transport_.Pump();
             }
             return false;
@@ -185,6 +212,139 @@ public:
                 return reader.Done();
             });
         };
+        auto flag = [&](const char* key) {
+            return cJSON_IsTrue(cJSON_GetObjectItem(args.get(), key));
+        };
+        auto wait = [&](int ms) {
+            const int64_t end = transport_.NowMs() + ms;
+            while (transport_.Alive() && transport_.NowMs() < end && !transport_.NativeCancelled())
+                transport_.Pump();
+        };
+        struct Shot {
+            std::string app;
+            bool locked = false, text = true;
+            std::vector<dfscreen::Item> items;
+            std::string bitmap;  // raw 1024-byte framebuffer when requested
+        };
+        auto companion = [&](const std::string& request) {
+            return Json(cJSON_Parse(transport_.Companion(request, 1500).c_str()), cJSON_Delete);
+        };
+        auto parse_items = [](cJSON* reply, Shot& shot) {
+            auto items = cJSON_GetObjectItem(reply, "items");
+            if (!cJSON_IsArray(items))
+                return false;
+            cJSON* entry = nullptr;
+            cJSON_ArrayForEach(entry, items) {
+                if (!cJSON_IsArray(entry) || cJSON_GetArraySize(entry) != 4 || shot.items.size() >= 64)
+                    return false;
+                auto x = cJSON_GetArrayItem(entry, 0), y = cJSON_GetArrayItem(entry, 1),
+                     color = cJSON_GetArrayItem(entry, 2), text = cJSON_GetArrayItem(entry, 3);
+                if (!cJSON_IsNumber(x) || !cJSON_IsNumber(y) || !cJSON_IsNumber(color) ||
+                    !cJSON_IsString(text))
+                    return false;
+                shot.items.push_back({x->valueint, y->valueint, color->valueint, text->valuestring});
+            }
+            return true;
+        };
+        // Returns an error code, empty on success.
+        auto read_screen = [&](bool bitmap, Shot& shot) -> std::string {
+            shot = Shot{};
+            auto reply = companion(std::string("{\"op\":\"screen\",\"bitmap\":") +
+                                   (bitmap ? "true" : "false") + "}");
+            if (!cJSON_IsObject(reply.get()))
+                return "invalid_response";
+            if (!cJSON_IsTrue(cJSON_GetObjectItem(reply.get(), "ok"))) {
+                auto code = String(reply.get(), "code");
+                return code == "unsupported" ? "firmware_update_required"
+                       : code.empty()        ? "screen_unavailable"
+                                             : code;
+            }
+            shot.app = String(reply.get(), "app");
+            shot.locked = cJSON_IsTrue(cJSON_GetObjectItem(reply.get(), "locked"));
+            shot.text = !cJSON_IsFalse(cJSON_GetObjectItem(reply.get(), "text"));
+            const int seq = Integer(reply.get(), "seq");
+            int next = Integer(reply.get(), "next", -1);
+            const bool has_bitmap = Integer(reply.get(), "bitmap") == 1024;
+            if (!parse_items(reply.get(), shot))
+                return "invalid_response";
+            for (int guard = 0; next >= 0; ++guard) {
+                if (guard >= 8)
+                    return "invalid_response";
+                auto page = companion("{\"op\":\"screen.page\",\"seq\":" + std::to_string(seq) +
+                                      ",\"text\":" + std::to_string(next) + "}");
+                if (!cJSON_IsTrue(cJSON_GetObjectItem(page.get(), "ok")) ||
+                    !parse_items(page.get(), shot))
+                    return "invalid_response";
+                const int following = Integer(page.get(), "next", -1);
+                if (following >= 0 && following <= next)
+                    return "invalid_response";
+                next = following;
+            }
+            if (bitmap && has_bitmap) {
+                for (int offset = 0; offset < 1024; offset += 384) {
+                    auto page = companion("{\"op\":\"screen.page\",\"seq\":" + std::to_string(seq) +
+                                          ",\"bitmap\":" + std::to_string(offset) + "}");
+                    std::string data;
+                    if (!cJSON_IsTrue(cJSON_GetObjectItem(page.get(), "ok")) ||
+                        Integer(page.get(), "off", -1) != offset ||
+                        !dfscreen::Unbase64(String(page.get(), "data"), data) ||
+                        data.size() != size_t(std::min(384, 1024 - offset)))
+                        return "invalid_response";
+                    shot.bitmap += data;
+                }
+            }
+            return {};
+        };
+        auto add_screen = [&](const Shot& shot, bool bitmap) {
+            cJSON_AddStringToObject(out, "app", shot.app.c_str());
+            cJSON_AddBoolToObject(out, "locked", shot.locked);
+            cJSON_AddStringToObject(out, "view", dfscreen::View(shot.items).c_str());
+            auto selected = dfscreen::Selected(shot.items);
+            cJSON_AddStringToObject(out, "selected",
+                                    selected ? dfscreen::Trim(selected->text).c_str() : "");
+            auto labels = dfscreen::FindButtons(shot.items);
+            auto buttons = cJSON_AddObjectToObject(out, "buttons");
+            cJSON_AddStringToObject(buttons, "left", labels.left.c_str());
+            cJSON_AddStringToObject(buttons, "ok", labels.ok.c_str());
+            cJSON_AddStringToObject(buttons, "right", labels.right.c_str());
+            if (!shot.text)
+                cJSON_AddBoolToObject(out, "text", false);  // direct-draw app: use bitmap
+            if (bitmap && shot.bitmap.size() == 1024)
+                cJSON_AddStringToObject(out, "bitmap", dfscreen::Base64(shot.bitmap).c_str());
+        };
+        // The label a key would activate, when it is a send/emulate/write/delete action.
+        auto danger = [](int key, const Shot& shot) -> std::string {
+            auto buttons = dfscreen::FindButtons(shot.items);
+            std::vector<std::string> labels;
+            if (key == kOk) {
+                if (auto selected = dfscreen::Selected(shot.items))
+                    labels.push_back(dfscreen::Trim(selected->text));
+                labels.push_back(buttons.ok);
+            } else if (key == kRight)
+                labels.push_back(buttons.right);
+            else if (key == kLeft)
+                labels.push_back(buttons.left);
+            for (const auto& label : labels)
+                if (Dangerous(label))
+                    return label;
+            return {};
+        };
+        auto press = [&](const KeyPress& key) {
+            return checked(transport_.Native(23, {}, {}, false, key.key + (key.hold ? 6 : 0)),
+                           "key_input");
+        };
+        auto gated = [&](int key, bool confirm, Shot& shot, int pressed) {
+            if (confirm || (key != kOk && key != kLeft && key != kRight))
+                return false;
+            auto label = danger(key, shot);
+            if (label.empty())
+                return false;
+            add_screen(shot, false);
+            cJSON_AddNumberToObject(out, "pressed", pressed);
+            cJSON_AddStringToObject(out, "action", label.c_str());
+            error("needs_confirmation", "confirm");
+            return true;
+        };
         if (!cJSON_IsObject(args.get()))
             return error("invalid_args");
         if (transport_.NativeCancelled())
@@ -208,6 +368,12 @@ public:
             cJSON_AddBoolToObject(out, "foreground", busy);
             cJSON_AddBoolToObject(out, "rpc_app_running", transport_.AppRunning());
             cJSON_AddStringToObject(out, "rpc_app", transport_.AppName().c_str());
+            cJSON_AddStringToObject(out, "retained_app", transport_.RetainedApp().c_str());
+            cJSON_AddNumberToObject(
+                out, "lease_remaining_ms",
+                transport_.RetainedApp().empty()
+                    ? 0
+                    : std::max<int64_t>(0, transport_.RetainedDeadline() - transport_.NowMs()));
         } else if (op == "native.system.info") {
             auto info = cJSON_AddObjectToObject(out, "info");
             auto power = cJSON_AddObjectToObject(out, "power");
@@ -244,34 +410,264 @@ public:
                     return finish();
             }
             cJSON_AddBoolToObject(out, "truncated", truncated);
+        } else if (op == "native.screen") {
+            // Read-only: also reports the PIN lock screen.
+            Shot shot;
+            const bool bitmap = flag("bitmap");
+            auto code = read_screen(bitmap, shot);
+            if (!code.empty())
+                return error(code, "screen");
+            add_screen(shot, bitmap);
         } else {
-            if (locked)
+            if (locked && op != "native.app.exit")
                 return error("locked");
-            if (op == "native.capture") {
+            if (op == "native.gpio" && !transport_.RetainedApp().empty() &&
+                String(args.get(), "action") != "read")
+                return error("busy", "retained_app_resource");
+            if (op == "native.app.catalog") {
+                const int offset = Integer(args.get(), "offset", 0),
+                          limit = Integer(args.get(), "limit", 4);
+                if (offset < 0 || offset > 1000 || limit < 1 || limit > 4)
+                    return error("invalid_catalog_range");
+                struct Candidate {
+                    std::string name;
+                    uint64_t size;
+                };
+                std::vector<Candidate> candidates;
+                int seen = 0;
+                bool truncated = false;
+                auto listed = transport_.Native(
+                    7, string_field(1, dfcatalog::kDirectory), [&](const dfwire::Message& message) {
+                        if (message.status)
+                            return true;
+                        if (message.tag != 8)
+                            return false;
+                        dfwire::Reader list(message.payload);
+                        dfwire::Field entry;
+                        while (list.Next(entry)) {
+                            if (entry.tag != 1 || entry.wire != 2)
+                                continue;
+                            dfwire::Reader file(entry.bytes);
+                            dfwire::Field field;
+                            std::string name;
+                            uint64_t type = 0, size = 0;
+                            while (file.Next(field)) {
+                                if (field.tag == 1 && field.wire == 0)
+                                    type = field.number;
+                                if (field.tag == 2 && field.wire == 2)
+                                    name = field.text();
+                                if (field.tag == 3 && field.wire == 0)
+                                    size = field.number;
+                            }
+                            if (!file.Done())
+                                return false;
+                            if (type || !dfcatalog::FileName(name))
+                                continue;
+                            if (seen == 1000) {
+                                truncated = true;
+                                continue;
+                            }
+                            int position = seen++;
+                            if (position >= offset && candidates.size() < size_t(limit))
+                                candidates.push_back({name, size});
+                        }
+                        return list.Done();
+                    });
+                auto items = cJSON_AddArrayToObject(out, "items");
+                auto rejected = cJSON_AddArrayToObject(out, "rejected");
+                auto reject = [&](const std::string& name, const char* code) {
+                    auto item = cJSON_CreateObject();
+                    cJSON_AddStringToObject(item, "registration", name.c_str());
+                    cJSON_AddStringToObject(item, "code", code);
+                    cJSON_AddItemToArray(rejected, item);
+                };
+                if (listed.status != 7 && !checked(listed, "catalog_list"))
+                    return finish();
+                for (const auto& candidate : candidates) {
+                    if (transport_.NativeCancelled())
+                        return error("cancelled", "catalog");
+                    if (transport_.NowMs() >= deadline_ms_)
+                        return error("timeout", "catalog");
+                    if (!candidate.size || candidate.size > 767) {
+                        reject(candidate.name, "invalid_registration_size");
+                        continue;
+                    }
+                    std::string data;
+                    auto read = read_file(std::string(dfcatalog::kDirectory) + "/" + candidate.name,
+                                          0, 768, data);
+                    if (read.status == 7) {
+                        reject(candidate.name, "registration_missing");
+                        continue;
+                    }
+                    if (!checked(read, "catalog_read"))
+                        return finish();
+                    Json value(data.size() == candidate.size &&
+                                       data.find('\0') == std::string::npos &&
+                                       deepflipper_json_within_limits(data.c_str(), 767, 3)
+                                   ? cJSON_ParseWithOpts(data.c_str(), nullptr, true)
+                                   : nullptr,
+                               cJSON_Delete);
+                    if (!dfcatalog::Validate(value.get(), candidate.name)) {
+                        reject(candidate.name, "invalid_registration");
+                        continue;
+                    }
+                    auto path = dfcatalog::String(value.get(), "app");
+                    auto stat = transport_.Native(24, string_field(1, path));
+                    if (stat.status == 7) {
+                        reject(candidate.name, "app_missing");
+                        continue;
+                    }
+                    if (!checked(stat, "catalog_app_stat"))
+                        return finish();
+                    uint64_t bytes = 0, type = 0;
+                    bool found = false;
+                    dfwire::Reader reader(stat.message.payload);
+                    dfwire::Field field;
+                    while (reader.Next(field)) {
+                        if (field.tag != 1 || field.wire != 2)
+                            continue;
+                        if (found)
+                            return error("invalid_response", "catalog_app_stat");
+                        found = true;
+                        dfwire::Reader file(field.bytes);
+                        dfwire::Field info;
+                        while (file.Next(info)) {
+                            if (info.tag == 1 && info.wire == 0)
+                                type = info.number;
+                            if (info.tag == 3 && info.wire == 0)
+                                bytes = info.number;
+                        }
+                        if (!file.Done())
+                            return error("invalid_response", "catalog_app_stat");
+                    }
+                    if (stat.message.tag != 25 || !reader.Done() || !found)
+                        return error("invalid_response", "catalog_app_stat");
+                    if (type ||
+                        bytes != uint64_t(cJSON_GetObjectItem(value.get(), "fap_size")->valueint)) {
+                        reject(candidate.name, "app_size_changed");
+                        continue;
+                    }
+                    auto digest = transport_.Native(14, string_field(1, path));
+                    if (digest.status == 7) {
+                        reject(candidate.name, "app_missing");
+                        continue;
+                    }
+                    if (!checked(digest, "catalog_app_digest"))
+                        return finish();
+                    std::string md5;
+                    dfwire::Reader hash(digest.message.payload);
+                    while (hash.Next(field))
+                        if (field.tag == 1 && field.wire == 2)
+                            md5 = field.text();
+                    if (digest.message.tag != 15 || !hash.Done() || !dfcatalog::Hex(md5))
+                        return error("invalid_response", "catalog_app_digest");
+                    if (md5 != dfcatalog::String(value.get(), "fap_md5")) {
+                        reject(candidate.name, "app_digest_changed");
+                        continue;
+                    }
+                    cJSON_DeleteItemFromObject(value.get(), "format");
+                    cJSON_DeleteItemFromObject(value.get(), "v");
+                    cJSON_AddBoolToObject(value.get(), "file_verified", true);
+                    cJSON_AddBoolToObject(value.get(), "runtime_verified", false);
+                    cJSON_AddItemToArray(items, value.release());
+                }
+                cJSON_AddNumberToObject(
+                    out, "next_offset",
+                    seen > offset + int(candidates.size()) ? offset + int(candidates.size()) : -1);
+                cJSON_AddNumberToObject(out, "total", seen);
+                cJSON_AddBoolToObject(out, "truncated", truncated);
+            } else if (op == "native.capture" || op == "native.app.describe" ||
+                       op == "native.app.call") {
+                const bool capture = op == "native.capture";
                 auto kind = String(args.get(), "kind"), request = String(args.get(), "request_id");
+                auto app =
+                    capture ? "/ext/apps/Tools/deepflipper_tools.fap" : String(args.get(), "app");
+                auto action =
+                    op == "native.app.describe" ? "describe" : String(args.get(), "action");
                 int timeout = Integer(args.get(), "timeout_ms", 5000);
-                if ((kind != "nfc" && kind != "ir" && kind != "subghz") || request.empty() ||
-                    request.size() > 30 ||
+                const bool reuse =
+                    !capture && transport_.RetainedApp() == app && transport_.AppRunning();
+                const bool keep_open =
+                    !capture && (cJSON_IsTrue(cJSON_GetObjectItem(args.get(), "keep_open")) ||
+                                 (op == "native.app.describe" && reuse));
+                const int lease_ms = Integer(args.get(), "lease_ms", 30000);
+                if (request.empty() || request.size() > 30 ||
                     request.find_first_not_of("0123456789_") != std::string::npos ||
-                    timeout < 250 || timeout > 10000)
-                    return error("invalid_capture_args");
+                    timeout < 250 || timeout > 10000 || lease_ms < 5000 || lease_ms > 60000)
+                    return error("invalid_app_request");
+                Json command(cJSON_CreateObject(), cJSON_Delete);
+                cJSON* arguments = nullptr;
+                if (capture) {
+                    action = kind == "nfc"      ? "nfc.read"
+                             : kind == "ir"     ? "ir.learn"
+                             : kind == "subghz" ? "subghz.record"
+                                                : "";
+                    arguments = cJSON_AddObjectToObject(command.get(), "arguments");
+                    if (kind == "subghz")
+                        cJSON_AddNumberToObject(arguments, "frequency",
+                                                Integer(args.get(), "frequency", 433920000));
+                } else {
+                    const auto text =
+                        op == "native.app.describe" ? "{}" : String(args.get(), "arguments");
+                    if (text.size() > 512)
+                        return error("arguments_too_large");
+                    if (!deepflipper_json_within_limits(text.c_str(), 512, 6))
+                        return error("invalid_arguments");
+                    const char* end = nullptr;
+                    arguments = cJSON_ParseWithOpts(text.c_str(), &end, true);
+                    if (!cJSON_IsObject(arguments)) {
+                        cJSON_Delete(arguments);
+                        return error("invalid_arguments");
+                    }
+                    cJSON_AddItemToObject(command.get(), "arguments", arguments);
+                }
+                if (!Path(app, "/ext/apps") || !Suffix(app, ".fap") || action.empty() ||
+                    action.size() > 48 ||
+                    action.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789._") !=
+                        std::string::npos)
+                    return error("invalid_app_or_action");
+                cJSON_AddNumberToObject(command.get(), "v", 1);
+                cJSON_AddStringToObject(command.get(), "request_id", request.c_str());
+                cJSON_AddStringToObject(command.get(), "action", action.c_str());
+                cJSON_AddNumberToObject(command.get(), "timeout_ms", timeout);
+                cJSON_AddBoolToObject(command.get(), "keep_open", keep_open);
+                cJSON_AddNumberToObject(command.get(), "lease_ms", lease_ms);
+                const auto command_json = Serialize(command.get());
+                if (command_json.size() >= 768)
+                    return error("request_too_large");
+                // Refuse an old mailbox rather than risk accepting a prior execution's result.
+                const std::string result_path = "/ext/deepflipper/jobs/" + request + ".json";
+                std::string previous;
+                auto prior = read_file(result_path, 0, 1, previous);
+                if (prior.status != 7) {
+                    if (!checked(prior, "mailbox_check"))
+                        return finish();
+                    return error("request_id_reused");
+                }
                 auto busy = transport_.Native(17);
                 uint64_t active = 0;
                 if (!checked(busy, "capture_app_state"))
                     return finish();
-                if (busy.message.tag != 18 || !number(busy.message, 1, active) || active)
+                if (busy.message.tag != 18 || !number(busy.message, 1, active) ||
+                    (active && !reuse))
                     return error("busy");
-                auto launch = string_field(1, "/ext/apps/Tools/deepflipper_tools.fap");
-                dfwire::String(launch, 2, "RPC");
-                if (!checked(transport_.Native(16, launch), "capture_adapter_open"))
-                    return finish();
-                if (!app_ready())
-                    return finish();
-                transport_.SetAppName("DeepFlipper Tools");
+                if (reuse && !active) {
+                    transport_.RetainApp("", 0);
+                    transport_.Reset();
+                    return error("app_session_lost");
+                }
+                if (!reuse) {
+                    auto launch = string_field(1, app);
+                    dfwire::String(launch, 2, "RPC");
+                    if (!checked(transport_.Native(16, launch), "capture_adapter_open"))
+                        return finish();
+                    if (!app_ready())
+                        return finish();
+                    transport_.SetAppName(app);
+                }
                 std::vector<uint8_t> payload;
-                dfwire::String(payload, 1, Serialize(args.get()));
+                dfwire::String(payload, 1, command_json);
                 bool okay = checked(transport_.Native(65, payload), "capture_start"), got = false;
-                std::string result_path = "/ext/deepflipper/jobs/" + request + ".json";
                 const int64_t end = transport_.NowMs() + timeout + 3000;
                 while (okay && transport_.Alive() && transport_.NowMs() < end &&
                        transport_.NowMs() < deadline_ms_) {
@@ -280,8 +676,15 @@ public:
                         okay = false;
                         break;
                     }
+                    uint64_t pin = 0;
+                    if (!desktop_lock(transport_.Native(66), pin, "app_lock") || pin) {
+                        if (pin)
+                            error("locked", "app_action");
+                        okay = false;
+                        break;
+                    }
                     std::string data;
-                    auto reply = read_file(result_path, 0, 1536, data);
+                    auto reply = read_file(result_path, 0, 4096, data);
                     if (reply.status == 7) {
                         transport_.Pump();
                         continue;
@@ -290,28 +693,67 @@ public:
                         okay = false;
                         break;
                     }
-                    Json parsed(cJSON_Parse(data.c_str()), cJSON_Delete);
-                    if (parsed && String(parsed.get(), "request_id") == request) {
+                    Json parsed(deepflipper_json_within_limits(data.c_str(), 4095, 8)
+                                    ? cJSON_ParseWithOpts(data.c_str(), nullptr, true)
+                                    : nullptr,
+                                cJSON_Delete);
+                    auto version = cJSON_GetObjectItemCaseSensitive(parsed.get(), "v");
+                    if (cJSON_IsObject(parsed.get()) && cJSON_IsNumber(version) &&
+                        version->valuedouble == 1 &&
+                        String(parsed.get(), "request_id") == request &&
+                        String(parsed.get(), "action") == action &&
+                        cJSON_IsObject(cJSON_GetObjectItem(parsed.get(), "data")) &&
+                        cJSON_IsBool(cJSON_GetObjectItem(parsed.get(), "ok"))) {
                         got = true;
                         bool success = cJSON_IsTrue(cJSON_GetObjectItem(parsed.get(), "ok"));
-                        cJSON_AddItemToObject(out, "capture", parsed.release());
+                        auto code = String(parsed.get(), "code");
+                        if (success && keep_open &&
+                            (!cJSON_IsTrue(
+                                 cJSON_GetObjectItem(parsed.get(), "session_supported")) ||
+                             !cJSON_IsTrue(cJSON_GetObjectItem(parsed.get(), "keep_open")))) {
+                            success = false;
+                            code = "session_not_supported";
+                        }
+                        cJSON_AddItemToObject(out, capture ? "capture" : "app_result",
+                                              parsed.release());
                         if (!success) {
-                            error("capture_failed", "capture");
+                            error(code.empty() ? "app_action_failed" : code, "app_action");
                             okay = false;
                         }
                         break;
                     }
-                    transport_.Pump();
+                    error("invalid_app_result", "app_result");
+                    okay = false;
+                    break;
                 }
                 if (okay && !got) {
                     error("timeout", "capture_result");
                     okay = false;
                 }
-                bool stopped = transport_.Alive() && app_exit();
+                if (okay && keep_open && !transport_.AppRunning()) {
+                    error("app_session_lost", "app_retention");
+                    okay = false;
+                }
+                const bool retained = okay && got && keep_open && transport_.Alive();
+                bool stopped = !retained && transport_.Alive() && app_exit();
+                if (retained)
+                    transport_.RetainApp(app, transport_.NowMs() + lease_ms);
+                cJSON_AddBoolToObject(out, "app_retained", retained);
                 cJSON_AddBoolToObject(out, "stopped", stopped);
-                if (!stopped) {
+                if (!retained && !stopped) {
                     transport_.Reset();
                     return error("stop_unconfirmed", "capture_cleanup");
+                }
+                if (got) {
+                    auto removed = transport_.Native(12, string_field(1, result_path), {}, true);
+                    cJSON_AddBoolToObject(out, "mailbox_removed",
+                                          removed.done && removed.error.empty() && !removed.status);
+                }
+                if (retained && (!transport_.Alive() || !transport_.AppRunning())) {
+                    cJSON_DeleteItemFromObject(out, "app_retained");
+                    cJSON_AddBoolToObject(out, "app_retained", false);
+                    transport_.Reset();
+                    return error("app_session_lost", "app_retention");
                 }
                 if (!okay)
                     return finish();
@@ -512,9 +954,141 @@ public:
                 cJSON_AddBoolToObject(out, "rpc_requested", rpc);
                 cJSON_AddStringToObject(out, "result",
                                         "application_opened_not_hardware_action_completed");
+                // Show what the app opened to; a failed read does not fail the open.
+                wait(400);
+                Shot shot;
+                if (transport_.Alive() && read_screen(false, shot).empty())
+                    add_screen(shot, false);
+            } else if (op == "native.keys") {
+                auto keys = Keys(String(args.get(), "keys"));
+                const int delay = Integer(args.get(), "delay_ms", 120);
+                if (keys.empty())
+                    return error("invalid_keys");
+                if (delay < 30 || delay > 1000)
+                    return error("invalid_delay");
+                const bool confirm = flag("confirm"), bitmap = flag("bitmap");
+                Shot shot;
+                int pressed = 0;
+                for (size_t i = 0; i < keys.size(); ++i) {
+                    const auto key = keys[i];
+                    if (!confirm && (key.key == kOk || key.key == kLeft || key.key == kRight)) {
+                        auto code = read_screen(false, shot);
+                        if (!code.empty()) {
+                            cJSON_AddNumberToObject(out, "pressed", pressed);
+                            return error(code, "screen");
+                        }
+                        if (gated(key.key, confirm, shot, pressed))
+                            return finish();
+                    }
+                    if (!press(key)) {
+                        cJSON_AddNumberToObject(out, "pressed", pressed);
+                        return finish();
+                    }
+                    ++pressed;
+                    if (i + 1 < keys.size())
+                        wait(delay);
+                }
+                wait(250);
+                cJSON_AddNumberToObject(out, "pressed", pressed);
+                auto code = read_screen(bitmap, shot);
+                if (!code.empty())
+                    return error(code, "screen");
+                add_screen(shot, bitmap);
+            } else if (op == "native.ui_select") {
+                const auto target = String(args.get(), "text");
+                if (dfscreen::Trim(target).empty() || target.size() > 64)
+                    return error("invalid_text");
+                const bool confirm = flag("confirm"), bitmap = flag("bitmap");
+                Shot shot;
+                auto code = read_screen(false, shot);
+                if (!code.empty())
+                    return error(code, "screen");
+                int moves = 0, scan_down = 0, scan_up = 0;
+                std::string last_view = dfscreen::View(shot.items);
+                const dfscreen::Item* found = nullptr;
+                while (true) {
+                    found = dfscreen::Find(shot.items, target);
+                    auto selected = dfscreen::Selected(shot.items);
+                    if (found && found == selected)
+                        break;
+                    if (found && !selected) {
+                        add_screen(shot, false);
+                        return error("no_highlight", "ui_select");
+                    }
+                    int key;
+                    if (found)
+                        key = found->y > selected->y ? kDown : kUp;
+                    else if (scan_down < 25)
+                        key = kDown, ++scan_down;
+                    else if (scan_up < 50)
+                        key = kUp, ++scan_up;
+                    else
+                        key = -1;
+                    if (key < 0 || moves >= 50 || transport_.NowMs() + 2000 >= deadline_ms_) {
+                        add_screen(shot, false);
+                        cJSON_AddNumberToObject(out, "moves", moves);
+                        return error("not_found", "ui_select");
+                    }
+                    if (!press({key, false}))
+                        return finish();
+                    ++moves;
+                    wait(60);
+                    code = read_screen(false, shot);
+                    if (!code.empty())
+                        return error(code, "screen");
+                    auto view = dfscreen::View(shot.items);
+                    // A list that does not wrap stops changing at its end: scan back up.
+                    if (!dfscreen::Find(shot.items, target) && key == kDown && view == last_view)
+                        scan_down = 25;
+                    last_view = view;
+                }
+                const auto chosen = dfscreen::Trim(found->text);
+                if (gated(kOk, confirm, shot, 0))
+                    return finish();
+                if (!press({kOk, false}))
+                    return finish();
+                wait(250);
+                code = read_screen(bitmap, shot);
+                cJSON_AddStringToObject(out, "chosen", chosen.c_str());
+                cJSON_AddNumberToObject(out, "moves", moves);
+                if (!code.empty())
+                    return error(code, "screen");
+                add_screen(shot, bitmap);
+            } else if (op == "native.home") {
+                bool busy = true;
+                int pressed = 0;
+                for (int i = 0; i <= 13; ++i) {
+                    auto state = transport_.Native(17);
+                    uint64_t value = 0;
+                    if (!checked(state, "application_state"))
+                        return finish();
+                    if (state.message.tag != 18 || !number(state.message, 1, value))
+                        return error("invalid_response");
+                    busy = value != 0;
+                    if (!busy || i == 13)
+                        break;
+                    // Twelve short Backs, then one long Back for apps that need it.
+                    if (!press({kBack, i == 12}))
+                        return finish();
+                    ++pressed;
+                    wait(300);
+                }
+                cJSON_AddBoolToObject(out, "home", !busy);
+                cJSON_AddNumberToObject(out, "pressed", pressed);
+                Shot shot;
+                if (read_screen(false, shot).empty())
+                    add_screen(shot, false);
+                if (busy)
+                    return error("app_still_open", "home");
             } else if (op == "native.app.exit") {
-                if (!app_exit())
+                const bool retained_owner = !transport_.RetainedApp().empty();
+                if (!app_exit()) {
+                    if (retained_owner)
+                        transport_.Reset();
+                    cJSON_AddBoolToObject(out, "stopped", false);
                     return error("app_not_closed_or_rpc_unsupported", "application_exit");
+                }
+                cJSON_AddBoolToObject(out, "stopped", true);
                 cJSON_AddStringToObject(out, "result", "application_exited");
             } else if (op == "native.input") {
                 int key = dfnative::Key(String(args.get(), "key"));

@@ -1,6 +1,6 @@
 #include <furi.h>
 #include <furi_hal.h>
-#include <rpc/rpc_app.h>
+#include <deepflipper_app/deepflipper_app.h>
 #include <storage/storage.h>
 #include <flipper_format/flipper_format.h>
 #include <mjs/common/frozen/frozen.h>
@@ -8,52 +8,24 @@
 #include <subghz/devices/devices.h>
 #include <nfc/nfc_scanner.h>
 #include "deepflipper_nfc.h"
+#include "deepflipper_radio.h"
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 typedef struct {
-    RpcAppSystem* rpc;
-    FuriEventFlag* events;
-    atomic_bool stop, detected, rf_gate, command_ready;
+    DeepFlipperApp* app;
+    atomic_bool detected, rf_gate;
     atomic_uint samples;
     NfcProtocol protocol;
-    char command[256];
     int32_t timings[4096];
     InfraredMessage ir;
     bool decoded;
 } ToolContext;
 
 static bool cancelled(ToolContext* ctx) {
-    return atomic_load(&ctx->stop) || furi_hal_rtc_is_flag_set(FuriHalRtcFlagLock);
-}
-static void rpc_event(const RpcAppSystemEvent* event, void* context) {
-    ToolContext* ctx = context;
-    if(event->type == RpcAppEventTypeSessionClose) {
-        rpc_system_app_set_callback(ctx->rpc, NULL, NULL);
-        ctx->rpc = NULL;
-        furi_event_flag_set(ctx->events, 1);
-        atomic_store(&ctx->stop, true);
-    } else if(event->type == RpcAppEventTypeAppExit) {
-        rpc_system_app_confirm(ctx->rpc, true);
-        rpc_system_app_send_exited(ctx->rpc);
-        rpc_system_app_set_callback(ctx->rpc, NULL, NULL);
-        ctx->rpc = NULL;
-        furi_event_flag_set(ctx->events, 1);
-        atomic_store(&ctx->stop, true);
-    } else if(event->type == RpcAppEventTypeDataExchange) {
-        bool valid = event->data.type == RpcAppSystemEventDataTypeBytes &&
-                     event->data.bytes.size < sizeof(ctx->command) && !ctx->command[0];
-        if(valid) {
-            memcpy(ctx->command, event->data.bytes.ptr, event->data.bytes.size);
-            ctx->command[event->data.bytes.size] = 0;
-            atomic_store(&ctx->command_ready, true);
-        }
-        rpc_system_app_confirm(ctx->rpc, valid);
-        if(valid) furi_event_flag_set(ctx->events, 1);
-    } else
-        rpc_system_app_confirm(ctx->rpc, false);
+    return deepflipper_app_cancelled(ctx->app);
 }
 static void detected(NfcScannerEvent event, void* context) {
     ToolContext* ctx = context;
@@ -179,96 +151,161 @@ static bool
     return ok;
 }
 
-int32_t deepflipper_tools_main(void* args) {
-    unsigned long pointer = 0;
-    if(!args || sscanf(args, "RPC %lX", &pointer) != 1 || !pointer) return 0;
+static const char* capture_action(
+    DeepFlipperApp* app,
+    const char* arguments,
+    uint32_t timeout,
+    FuriString* output,
+    void* context) {
+    const char* kind = context;
+    if(memmgr_get_free_heap() < sizeof(ToolContext) + 8192 ||
+       memmgr_heap_get_max_free_block() < sizeof(ToolContext))
+        return "insufficient_memory";
     ToolContext* ctx = calloc(1, sizeof(ToolContext));
-    ctx->rpc = (RpcAppSystem*)pointer;
-    ctx->events = furi_event_flag_alloc();
-    rpc_system_app_set_callback(ctx->rpc, rpc_event, ctx);
-    rpc_system_app_send_started(ctx->rpc);
-    furi_event_flag_wait(ctx->events, 1, FuriFlagWaitAny, 5000);
-    char *kind = NULL, *request = NULL;
-    int timeout = 5000;
+    ctx->app = app;
     unsigned frequency = 433920000;
-    if(atomic_load(&ctx->command_ready))
-        json_scanf(
-            ctx->command,
-            strlen(ctx->command),
-            "{kind:%Q,request_id:%Q,timeout_ms:%d,frequency:%u}",
-            &kind,
-            &request,
-            &timeout,
-            &frequency);
-    bool valid = kind &&
-                 (!strcmp(kind, "nfc") || !strcmp(kind, "ir") || !strcmp(kind, "subghz")) &&
-                 request && strlen(request) <= 30 && timeout >= 250 && timeout <= 10000;
-    for(size_t i = 0; valid && request[i]; ++i)
-        if((request[i] < '0' || request[i] > '9') && request[i] != '_') valid = false;
-    Storage* storage = furi_record_open(RECORD_STORAGE);
-    storage_common_mkdir(storage, EXT_PATH("deepflipper"));
-    storage_common_mkdir(storage, EXT_PATH("deepflipper/jobs"));
-    char result[1200] = {0}, path[120] = {0}, result_path[120] = {0}, detail[510] = {0};
-    if(valid && !cancelled(ctx)) {
-        const char* folder = !strcmp(kind, "nfc") ? "nfc" :
-                             !strcmp(kind, "ir")  ? "infrared" :
-                                                    "subghz";
-        const char* ext = !strcmp(kind, "nfc") ? "nfc" : !strcmp(kind, "ir") ? "ir" : "sub";
-        snprintf(path, sizeof(path), "/ext/%s/deepflipper_%s.%s", folder, request, ext);
-        snprintf(result_path, sizeof(result_path), "/ext/deepflipper/jobs/%s.json", request);
-        char folder_path[32];
-        snprintf(folder_path, sizeof(folder_path), "/ext/%s", folder);
-        storage_common_mkdir(storage, folder_path);
-        FileInfo info;
-        bool ok = false;
-        if(storage_common_stat(storage, path, &info) == FSE_NOT_EXIST) {
-            if(!strcmp(kind, "nfc"))
-                ok = nfc_read(ctx, timeout, path, detail, sizeof(detail));
-            else if(!strcmp(kind, "ir") || !strcmp(kind, "subghz")) {
-                FlipperFormat* file = flipper_format_file_alloc(storage);
-                if(flipper_format_file_open_new(file, path))
-                    ok = !strcmp(kind, "ir") ? ir_learn(ctx, timeout, file) :
-                                               rf_record(ctx, timeout, frequency, file);
-                flipper_format_free(file);
-                if(!ok) storage_common_remove(storage, path);
+    if(!strcmp(kind, "subghz")) {
+        struct json_token value = JSON_INVALID_TOKEN;
+        json_scanf(arguments, strlen(arguments), "{frequency:%T}", &value);
+        if(value.type != JSON_TYPE_NUMBER || value.len > 9) {
+            free(ctx);
+            return "invalid_frequency";
+        }
+        frequency = 0;
+        for(int i = 0; i < value.len; ++i) {
+            if(value.ptr[i] < '0' || value.ptr[i] > '9') {
+                free(ctx);
+                return "invalid_frequency";
             }
+            frequency = frequency * 10 + value.ptr[i] - '0';
         }
-        struct json_out out = JSON_OUT_BUF(result, sizeof(result));
-        json_printf(
-            &out,
-            "{ok:%B,request_id:%Q,kind:%Q,state:%Q,path:%Q,samples:%u,raw_unverified:%B,truncated:%B}",
-            ok,
-            request,
-            kind,
-            ok             ? "done" :
-            cancelled(ctx) ? "cancelled" :
-                             "no_signal_or_read_failed",
-            ok ? path : "",
-            atomic_load(&ctx->samples),
-            !strcmp(kind, "subghz"),atomic_load(&ctx->samples)==4096);
-        if(detail[0]) {
-            size_t used = strlen(result);
-            if(used)
-                snprintf(result + used - 1, sizeof(result) - used + 1, ",\"card\":%s}", detail);
+        if(!furi_hal_subghz_is_frequency_valid(frequency)) {
+            free(ctx);
+            return "invalid_frequency";
         }
-        // Store a bounded result after releasing the reader/radio. The UART client
-        // reads this file; arbitrary async RPC payloads are not used as results.
-        File* output = storage_file_alloc(storage);
-        char temporary[128];
-        snprintf(temporary, sizeof(temporary), "%s.tmp", result_path);
-        if(storage_file_open(output, temporary, FSAM_WRITE, FSOM_CREATE_ALWAYS))
-            storage_file_write(output, result, strlen(result));
-        storage_file_free(output);
-        storage_common_rename(storage, temporary, result_path);
     }
+    const char* request = deepflipper_app_request_id(app);
+    Storage* storage = furi_record_open(RECORD_STORAGE);
+    const char* folder = !strcmp(kind, "nfc") ? "nfc" :
+                         !strcmp(kind, "ir")  ? "infrared" :
+                                                "subghz";
+    const char* ext = !strcmp(kind, "nfc") ? "nfc" : !strcmp(kind, "ir") ? "ir" : "sub";
+    char result[1200] = {0}, path[120], detail[510] = {0}, folder_path[32];
+    snprintf(path, sizeof(path), "/ext/%s/deepflipper_%s.%s", folder, request, ext);
+    snprintf(folder_path, sizeof(folder_path), "/ext/%s", folder);
+    storage_common_mkdir(storage, folder_path);
+    FileInfo info;
+    bool ok = false;
+    if(storage_common_stat(storage, path, &info) == FSE_NOT_EXIST && !cancelled(ctx)) {
+        if(!strcmp(kind, "nfc")) {
+            ok = nfc_read(ctx, timeout, path, detail, sizeof(detail));
+        } else {
+            FlipperFormat* file = flipper_format_file_alloc(storage);
+            if(flipper_format_file_open_new(file, path))
+                ok = !strcmp(kind, "ir") ? ir_learn(ctx, timeout, file) :
+                                           rf_record(ctx, timeout, frequency, file);
+            flipper_format_free(file);
+        }
+        if(!ok) storage_common_remove(storage, path);
+    }
+    struct json_out out = JSON_OUT_BUF(result, sizeof(result));
+    json_printf(
+        &out,
+        "{kind:%Q,path:%Q,samples:%u,raw_unverified:%B,truncated:%B,card:%s}",
+        kind,
+        ok ? path : "",
+        atomic_load(&ctx->samples),
+        !strcmp(kind, "subghz"),
+        atomic_load(&ctx->samples) == 4096,
+        detail[0] ? detail : "{}");
+    furi_string_set(output, result);
+    const char* code = ok ? NULL : cancelled(ctx) ? "cancelled" : "no_signal_or_read_failed";
     furi_record_close(RECORD_STORAGE);
-    free(kind);
-    free(request);
-    // A live RPC callback owns ctx until AppExit/SessionClose detaches it.
-    // The client confirms actual shutdown by polling Loader's busy state.
-    while(!atomic_load(&ctx->stop))
-        furi_event_flag_wait(ctx->events, 1, FuriFlagWaitAny, 200);
-    furi_event_flag_free(ctx->events);
     free(ctx);
-    return 0;
+    return code;
+}
+
+static const char* nfc_action(
+    DeepFlipperApp* app,
+    const char* args,
+    uint32_t timeout,
+    FuriString* output,
+    void* context) {
+    if(deepflipper_radio_owned(context)) return "radio_busy_stop_first";
+    return capture_action(app, args, timeout, output, "nfc");
+}
+static const char* ir_action(
+    DeepFlipperApp* app,
+    const char* args,
+    uint32_t timeout,
+    FuriString* output,
+    void* context) {
+    if(deepflipper_radio_owned(context)) return "radio_busy_stop_first";
+    return capture_action(app, args, timeout, output, "ir");
+}
+static const char* rf_action(
+    DeepFlipperApp* app,
+    const char* args,
+    uint32_t timeout,
+    FuriString* output,
+    void* context) {
+    if(deepflipper_radio_owned(context)) return "radio_busy_stop_first";
+    return capture_action(app, args, timeout, output, "subghz");
+}
+
+#include "deepflipper_subghz.h"
+static const char* decode_action(
+    DeepFlipperApp* app,
+    const char* args,
+    uint32_t timeout,
+    FuriString* output,
+    void* context) {
+    if(deepflipper_radio_owned(context)) return "radio_busy_stop_first";
+    return deepflipper_subghz_decode(app, args, timeout, output, context);
+}
+static const DeepFlipperAction actions[] = {
+    {"nfc.read",
+     "Identify/read supported public NFC data and save .nfc; cached Classic keys only.",
+     "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}",
+     nfc_action,
+     0},
+    {"ir.learn",
+     "Learn one IR button and save .ir. RAW carrier assumes 38kHz.",
+     "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}",
+     ir_action,
+     0},
+    {"subghz.record",
+     "Record bounded OOK650 RAW to .sub; decoding is a separate action.",
+     "{\"type\":\"object\",\"properties\":{\"frequency\":{\"type\":\"integer\",\"minimum\":300000000,\"maximum\":928000000}},\"required\":[\"frequency\"],\"additionalProperties\":false}",
+     rf_action,
+     0},
+    {"subghz.decode",
+     "Decode saved OOK650 RAW with firmware decoders, up to 4096 timings. No RF output or full FSK support.",
+     "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"maxLength\":192}},\"required\":[\"path\"],\"additionalProperties\":false}",
+     decode_action,
+     0},
+    {"subghz.rx.start",
+     "Start OOK650 RAW receive in a retained app session. Stop to save; lease expiry discards the buffer.",
+     "{\"type\":\"object\",\"properties\":{\"frequency\":{\"type\":\"integer\"}},\"required\":[\"frequency\"],\"additionalProperties\":false}",
+     deepflipper_radio_start,
+     DeepFlipperActionRequiresSession},
+    {"subghz.rx.state",
+     "Read receive state and buffered sample count. Keep the session open to continue recording.",
+     "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}",
+     deepflipper_radio_state,
+     DeepFlipperActionRequiresSession},
+    {"subghz.rx.stop",
+     "Stop receive, release radio and save RAW .sub (save:false discards). Can close the app afterward.",
+     "{\"type\":\"object\",\"properties\":{\"save\":{\"type\":\"boolean\",\"default\":true}},\"additionalProperties\":false}",
+     deepflipper_radio_stop,
+     0},
+};
+int32_t deepflipper_tools_main(void* args) {
+    DeepFlipperRadio* radio = deepflipper_radio_alloc();
+    const DeepFlipperAppHooks hooks = {
+        .tick = deepflipper_radio_tick, .cleanup = deepflipper_radio_cleanup};
+    int32_t result = deepflipper_app_run_ex(
+        args, "deepflipper.tools", actions, COUNT_OF(actions), radio, &hooks);
+    deepflipper_radio_free(radio);
+    return result;
 }

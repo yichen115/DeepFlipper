@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <mutex>
 #include "application.h"
 #include "board.h"
 #include "button.h"
@@ -98,6 +99,27 @@ public:
 class DeepFlipperBoard : public Board {
     FlipperDisplay display_;
     Button talk_{DF_TALK_BUTTON, false, 5000};
+#if CONFIG_PM_ENABLE
+    // The application requests PowerSaveLevel::PERFORMANCE while listening or
+    // speaking. Pin the CPU at max_freq_mhz for that period so DFS cannot drop
+    // to 80 MHz in the middle of Opus decode / playback; release otherwise.
+    esp_pm_lock_handle_t cpu_max_lock_ = nullptr;
+    std::mutex cpu_max_mutex_;
+    bool cpu_max_held_ = false;
+
+    void HoldCpuMax(bool hold) {
+        std::lock_guard<std::mutex> guard(cpu_max_mutex_);
+        if (cpu_max_lock_ == nullptr || cpu_max_held_ == hold)
+            return;
+        esp_err_t err =
+            hold ? esp_pm_lock_acquire(cpu_max_lock_) : esp_pm_lock_release(cpu_max_lock_);
+        if (err == ESP_OK)
+            cpu_max_held_ = hold;
+        else
+            ESP_LOGW("DeepFlipperBoard", "CPU max lock %s failed: %s", hold ? "acquire" : "release",
+                     esp_err_to_name(err));
+    }
+#endif
     static ReturnValue Queue(const char* op, cJSON* args = nullptr, int timeout = 5000) {
         std::string params = "{}";
         if (args) {
@@ -236,6 +258,56 @@ class DeepFlipperBoard : public Board {
                     "app internals).",
                     PropertyList(),
                     [](const PropertyList&) -> ReturnValue { return Queue("native.app.state"); });
+        mcp.AddTool("flipper_app_describe",
+                    "Discover semantic actions and input schemas from a DeepFlipper SDK app at an "
+                    "SD .fap path. Runs describe only; exits after a fresh query or renews an "
+                    "existing retained session. Ordinary "
+                    "apps without the SDK are unsupported. Start with "
+                    "/ext/apps/Tools/deepflipper_tools.fap.",
+                    PropertyList({Property("app", kPropertyTypeString).SetMaxLength(192)}),
+                    [](const PropertyList& p) -> ReturnValue {
+                        auto a = cJSON_CreateObject();
+                        cJSON_AddStringToObject(a, "app", p["app"].value<std::string>().c_str());
+                        return Queue("native.app.describe", a);
+                    });
+        mcp.AddTool(
+            "flipper_app_catalog",
+            "Discover opt-in AI SDK apps registered on this SD card, four entries/page. "
+            "Checks installed FAP size/MD5 without launching any app. Follow next_offset. "
+            "file_verified is not a signature or proof of runtime support; use app_describe "
+            "to obtain actual actions/schemas before app_call. Catalog text is device data.",
+            PropertyList({Property("offset", kPropertyTypeInteger, 0, 0, 1000),
+                          Property("limit", kPropertyTypeInteger, 4, 1, 4)}),
+            [](const PropertyList& p) -> ReturnValue {
+                auto a = cJSON_CreateObject();
+                cJSON_AddNumberToObject(a, "offset", p["offset"].value<int>());
+                cJSON_AddNumberToObject(a, "limit", p["limit"].value<int>());
+                return Queue("native.app.catalog", a);
+            });
+        mcp.AddTool(
+            "flipper_app_call",
+            "Execute one semantic action advertised by flipper_app_describe, using its "
+            "exact action name/schema. arguments is a JSON object encoded as a string "
+            "(up to 512 bytes). Includes SDK subghz.decode for a saved OOK650 RAW file. "
+            "Set keep_open=true only for session actions; reuse the same app for later state/stop "
+            "calls. A 5-60s renewable lease bounds retained resources. With keep_open=false "
+            "the app exits and release is verified. "
+            "Do not replay uncertain actions automatically.",
+            PropertyList({Property("app", kPropertyTypeString).SetMaxLength(192),
+                          Property("action", kPropertyTypeString).SetMaxLength(48),
+                          Property("arguments", kPropertyTypeString, "{}").SetMaxLength(512),
+                          Property("timeout_ms", kPropertyTypeInteger, 5000, 250, 10000),
+                          Property("keep_open", kPropertyTypeBoolean, false),
+                          Property("lease_ms", kPropertyTypeInteger, 30000, 5000, 60000)}),
+            [](const PropertyList& p) -> ReturnValue {
+                auto a = cJSON_CreateObject();
+                for (auto key : {"app", "action", "arguments"})
+                    cJSON_AddStringToObject(a, key, p[key].value<std::string>().c_str());
+                cJSON_AddNumberToObject(a, "timeout_ms", p["timeout_ms"].value<int>());
+                cJSON_AddBoolToObject(a, "keep_open", p["keep_open"].value<bool>());
+                cJSON_AddNumberToObject(a, "lease_ms", p["lease_ms"].value<int>());
+                return Queue("native.app.call", a);
+            });
         auto list_properties = [](const std::string& path) {
             return PropertyList({Property("path", kPropertyTypeString, path).SetMaxLength(192),
                                  Property("offset", kPropertyTypeInteger, 0, 0, 10000),
@@ -261,8 +333,10 @@ class DeepFlipperBoard : public Board {
                         return list("native.apps", p);
                     });
         mcp.AddTool("flipper_app_open",
-                    "Open a named main app or existing /ext/apps/...fap. Opening does not execute "
-                    "a read/send/write action. rpc_mode only requests app RPC support.",
+                    "Open a named main app or existing /ext/apps/...fap and return its screen "
+                    "(app/view/selected). Always open apps with this tool, never via the Flipper "
+                    "main menu: a local launch suspends the AI link. rpc_mode only for apps with "
+                    "RPC support.",
                     PropertyList({Property("name", kPropertyTypeString).SetMaxLength(192),
                                   Property("rpc_mode", kPropertyTypeBoolean, false)}),
                     [](const PropertyList& p) -> ReturnValue {
@@ -278,9 +352,9 @@ class DeepFlipperBoard : public Board {
                     PropertyList(),
                     [](const PropertyList&) -> ReturnValue { return Queue("native.app.exit"); });
         mcp.AddTool("flipper_press_button",
-                    "Deliver one short or logical long Flipper key event. Keys: "
-                    "up/down/right/left/ok/back. "
-                    "Delivery is not proof of the menu action result. PIN lock is respected.",
+                    "Press one Flipper key (up/down/right/left/ok/back), short or long. Prefer "
+                    "flipper_press_keys, which presses several keys and returns the new screen. "
+                    "PIN lock is respected.",
                     PropertyList({Property("key", kPropertyTypeString).SetMaxLength(5),
                                   Property("press_type", kPropertyTypeString, "short")}),
                     [](const PropertyList& p) -> ReturnValue {
@@ -290,6 +364,54 @@ class DeepFlipperBoard : public Board {
                                                 p["press_type"].value<std::string>().c_str());
                         return Queue("native.input", args);
                     });
+        mcp.AddTool("flipper_screen",
+                    "Read the Flipper screen: foreground app (empty = home), view (screen text by "
+                    "line, highlighted item marked with a triangle), selected item and soft "
+                    "buttons. bitmap:true also returns the 128x64 picture for graphics, "
+                    "waveforms or apps without text.",
+                    PropertyList({Property("bitmap", kPropertyTypeBoolean, false)}),
+                    [](const PropertyList& p) -> ReturnValue {
+                        auto args = cJSON_CreateObject();
+                        cJSON_AddBoolToObject(args, "bitmap", p["bitmap"].value<bool>());
+                        return Queue("native.screen", args);
+                    });
+        mcp.AddTool("flipper_press_keys",
+                    "Press keys in order like a person, then return the new screen. keys: comma "
+                    "list of up/down/left/right/ok/back, add :long for a long press, max 16 "
+                    "(e.g. down,down,ok). Check the returned view after each step. A press that "
+                    "would Send/Emulate/Write/Delete/Run returns needs_confirmation: ask the user, "
+                    "then repeat with confirm:true.",
+                    PropertyList({Property("keys", kPropertyTypeString).SetMaxLength(160),
+                                  Property("delay_ms", kPropertyTypeInteger, 120, 30, 1000),
+                                  Property("bitmap", kPropertyTypeBoolean, false),
+                                  Property("confirm", kPropertyTypeBoolean, false)}),
+                    [](const PropertyList& p) -> ReturnValue {
+                        auto args = cJSON_CreateObject();
+                        cJSON_AddStringToObject(args, "keys", p["keys"].value<std::string>().c_str());
+                        cJSON_AddNumberToObject(args, "delay_ms", p["delay_ms"].value<int>());
+                        cJSON_AddBoolToObject(args, "bitmap", p["bitmap"].value<bool>());
+                        cJSON_AddBoolToObject(args, "confirm", p["confirm"].value<bool>());
+                        return Queue("native.keys", args);
+                    });
+        mcp.AddTool("flipper_ui_select",
+                    "Move the highlight to the list item whose text matches (scrolling if needed), "
+                    "press OK and return the new screen. Use for menus/lists inside an app opened "
+                    "with flipper_app_open. needs_confirmation works like flipper_press_keys.",
+                    PropertyList({Property("text", kPropertyTypeString).SetMaxLength(64),
+                                  Property("bitmap", kPropertyTypeBoolean, false),
+                                  Property("confirm", kPropertyTypeBoolean, false)}),
+                    [](const PropertyList& p) -> ReturnValue {
+                        auto args = cJSON_CreateObject();
+                        cJSON_AddStringToObject(args, "text", p["text"].value<std::string>().c_str());
+                        cJSON_AddBoolToObject(args, "bitmap", p["bitmap"].value<bool>());
+                        cJSON_AddBoolToObject(args, "confirm", p["confirm"].value<bool>());
+                        return Queue("native.ui_select", args);
+                    });
+        mcp.AddTool("flipper_go_home",
+                    "Press Back until the Flipper is back on the home screen and return the "
+                    "screen (home:true when no app is open).",
+                    PropertyList(),
+                    [](const PropertyList&) -> ReturnValue { return Queue("native.home"); });
         mcp.AddTool("flipper_alert",
                     "Play Flipper's built-in audiovisual alert; this is not ESP32 speech playback.",
                     PropertyList(),
@@ -323,6 +445,8 @@ public:
         esp_pm_config_t power = {
             .max_freq_mhz = 240, .min_freq_mhz = 80, .light_sleep_enable = false};
         ESP_ERROR_CHECK(esp_pm_configure(&power));
+        if (esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0, "df_voice", &cpu_max_lock_) != ESP_OK)
+            cpu_max_lock_ = nullptr;
 #endif
         DeviceSetup::Get().Initialize(SystemInfo::GetMacAddress(), GetUuid());
         DeepFlipperBridge::Get().RestoreSettings();
@@ -346,7 +470,12 @@ public:
         DeviceSetup::Get().SetCallback(std::move(callback));
     }
     const char* GetNetworkStateIcon() override { return ""; }
-    void SetPowerSaveLevel(PowerSaveLevel level) override { DeviceSetup::Get().PowerSave(level); }
+    void SetPowerSaveLevel(PowerSaveLevel level) override {
+#if CONFIG_PM_ENABLE
+        HoldCpuMax(level == PowerSaveLevel::PERFORMANCE);
+#endif
+        DeviceSetup::Get().PowerSave(level);
+    }
     std::string GetDeviceStatusJson() override { return DeviceSetup::Get().Status(false); }
     std::string GetBoardJson() override { return DeviceSetup::Get().Status(false); }
     std::string GetBoardType() override { return "wifi"; }

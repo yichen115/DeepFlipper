@@ -1,0 +1,10 @@
+App(
+    appid="whale_pet",
+    name="Whale Pet",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="whale_pet_main",
+    requires=["gui", "storage", "rpc_start"],
+    stack_size=4096,
+    fap_category="Games",
+    fap_description="Offline whale companion: care, Catch Rice, expressions and gentle growth",
+)

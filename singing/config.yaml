@@ -1,0 +1,59 @@
+# DeepFlipper 唱歌渲染服务（singing/worker.py）配置。路径相对于本文件所在目录。
+
+host: 0.0.0.0
+port: 8790
+# 共享口令：留空时依次读取环境变量 SINGING_TOKEN、singing/token.txt（setup_windows.ps1 会生成）
+token: ""
+
+songs_dirs:                  # 原曲目录，可以写多个，也可以是绝对路径（如 D:/Music）；会往下找 3 层子文件夹
+  - songs_in                 # 文件名就是歌名，建议“歌手 - 歌名.mp3”
+download_dir: ""             # 链接下载的歌放哪里；留空 = 第一个原曲目录下的 downloads/
+cache_dir: cache             # 练好的翻唱成品（同一首歌+音色+音高+片段 直接复用）
+# 管理页“唱歌”里改的路径保存在同目录 config.local.yaml，会覆盖上面三项；删掉它就恢复这里的设置
+max_queue: 5                 # 排队上限（同时只渲染一首）
+max_cached: 60               # 最多保留多少首成品，超出删最旧的
+
+# 片段：从歌曲 start_ratio 处开始截 clip_seconds 秒（0 = 整首）
+clip_seconds: 90
+start_ratio: 0.3
+
+# 人声分离（python-audio-separator）
+separator:
+  model: model_bs_roformer_ep_317_sdr_12.9755.ckpt   # BS-Roformer；备选 vocals_mel_band_roformer.ckpt
+  model_dir: models/separator
+  overlap: 2            # Roformer 重叠窗口数：2 较快，4 质量更好
+  use_autocast: true    # 半精度推理，省显存
+
+# RVC 音色（infer-rvc-python）
+rvc:
+  model: models/whale.pth        # 训练好的鲸鱼娘音色
+  index: models/whale.index      # 可选；没有就留空
+  rmvpe: models/rmvpe.pt
+  hubert: models/hubert_base     # ContentVec，与 Applio 训练一致（setup_windows.ps1 下载）
+  f0_method: rmvpe
+  index_rate: 0.5
+  protect: 0.33
+  filter_radius: 3
+  rms_mix_rate: 0.25
+  # 音高：auto 时按 pitch_mode 自动移调
+  #   fit（默认）：看整首歌的音域（低音第 10 百分位、高音第 95 百分位），选一个移调让它落进
+  #     min_f0_hz–max_f0_hz（鲸鱼娘的说话素材大多在 210–480 Hz，高过 ~550 Hz 会唱哑）。
+  #     能整八度就整八度；不行就移几个半音，伴奏一起移，和 KTV 升降调一样。
+  #   octave：旧做法，只按中位音高整八度移（-12/0/+12），高音多的歌容易破音。
+  # 也可以在点歌时说“降两个调”，或者把 default_pitch 写成整数半音。
+  default_pitch: auto
+  pitch_mode: fit
+  target_f0_hz: 330
+  min_f0_hz: 200
+  max_f0_hz: 480
+  max_auto_shift: 12
+
+# 混音
+mix:
+  vocal_volume: 1.0
+  instrumental_volume: 0.8
+  loudnorm: true        # 统一响度（-16 LUFS），和说话音量接近
+  fade_in: 1.5
+  fade_out: 3.0
+  sample_rate: 24000    # 输出 24 kHz 单声道 16 位 WAV（语音服务直接播放）
+  min_vocal_db: -50     # 分离出的人声低于这个响度 = 纯音乐，拒绝渲染

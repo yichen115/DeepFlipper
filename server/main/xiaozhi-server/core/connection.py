@@ -14,39 +14,31 @@ import websockets
 import opuslib_next
 import numpy as np
 
-from core.utils.util import (
-    extract_json_from_string,
-    check_vad_update,
-    check_asr_update,
-    filter_sensitive_info,
-)
+from core.utils.util import extract_json_from_string
 from typing import Dict, Any
 from collections import deque
 from core.utils.modules_initialize import (
-    initialize_modules,
     initialize_tts,
     initialize_asr,
 )
-from core.handle.reportHandle import report, enqueue_tool_report
+from core.handle.reportHandle import enqueue_tool_report
 from core.providers.tts.default import DefaultTTS
 from concurrent.futures import ThreadPoolExecutor
 from core.utils.dialogue import Message, Dialogue
-from core.conversation_history import history_for, record_event, record_message
+from core.conversation_history import history_for, record_event, record_message, record_tool
 from config.config_loader import get_project_dir
 from core.providers.asr.dto.dto import InterfaceType
 from core.handle.textHandle import handleTextMessage
 from core.providers.tools.unified_tool_handler import UnifiedToolHandler
 from plugins_func.loadplugins import auto_import_modules
-from plugins_func.register import Action, ActionResponse, all_function_registry, module_func_map
+from plugins_func.register import Action, ActionResponse
 from core.auth import AuthenticationError
-from config.config_loader import get_private_config_from_api
 from core.providers.tts.dto.dto import ContentType, TTSMessageDTO, SentenceType
 from config.logger import setup_logging, build_module_string, create_connection_logger
-from config.manage_api_client import DeviceNotFoundException, DeviceBindException, generate_and_save_chat_title
 from core.utils.prompt_manager import PromptManager
-from core.utils.voiceprint_provider import VoiceprintProvider
 from core.utils.util import get_system_error_response
 from core.utils import textUtils
+from core.utils import flipper_screen
 
 
 TAG = __name__
@@ -98,10 +90,9 @@ class ConnectionHandler:
         self.need_bind = False  # 是否需要绑定设备
         self.bind_completed_event = asyncio.Event()
         self.bind_code = None  # 绑定设备的验证码
-        self.last_bind_prompt_time = 0  # 上次播放绑定提示的时间戳(秒)
-        self.bind_prompt_interval = 60  # 绑定提示播放间隔(秒)
 
-        self.read_config_from_api = self.config.get("read_config_from_api", False)
+        # DeepFlipper never reads per-device config from a remote manager.
+        self.read_config_from_api = False
 
         self.websocket: websockets.ServerConnection | None = None
         self.headers = None
@@ -125,13 +116,6 @@ class ConnectionHandler:
         self.stop_event = threading.Event()
         self.executor = ThreadPoolExecutor(max_workers=5)
 
-        # 添加上报线程池
-        self.report_queue = queue.Queue()
-        self.report_thread = None
-        # 未来可以通过修改此处，调节asr的上报和tts的上报，目前默认都开启
-        self.report_asr_enable = self.read_config_from_api
-        self.report_tts_enable = self.read_config_from_api
-
         # 依赖的组件
         self.vad = None
         self.asr = None
@@ -142,7 +126,7 @@ class ConnectionHandler:
         self.memory = _memory
         self.intent = _intent
 
-        # 为每个连接单独管理声纹识别
+        # 声纹识别未启用（ASR 基类仍会读取该属性）
         self.voiceprint_provider = None
 
         # vad相关变量
@@ -299,29 +283,7 @@ class ConnectionHandler:
             await self.close(ws)
             return
         try:
-            # 守护线程1：独立生成标题（不依赖记忆模型）
-            # 仅在服务端开启 chat_history 上报时才触发标题生成，
-            # 否则服务端无法按 session_id 反查到对应的 agent/chat_history，
-            # 会抛出"智能体未找到"错误
-            if self.session_id and self.chat_history_conf != 0:
-                def generate_title_task():
-                    try:
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        loop.run_until_complete(
-                            generate_and_save_chat_title(self.session_id)
-                        )
-                    except Exception as e:
-                        self.logger.bind(tag=TAG).error(f"生成标题失败: {e}")
-                    finally:
-                        try:
-                            loop.close()
-                        except Exception:
-                            pass
-
-                threading.Thread(target=generate_title_task, daemon=True).start()
-
-            # 守护线程2：走老流程记忆保存（仅记忆，不含标题）
+            # 后台保存记忆（nomem 时为空操作）
             if self.memory:
                 # 使用线程池异步保存记忆
                 def save_memory_task():
@@ -356,15 +318,8 @@ class ConnectionHandler:
                 )
 
     async def _discard_message_with_bind_prompt(self):
-        """丢弃消息并检查是否需要播放绑定提示"""
-        current_time = time.time()
-        # 检查是否需要播放绑定提示
-        if current_time - self.last_bind_prompt_time >= self.bind_prompt_interval:
-            self.last_bind_prompt_time = current_time
-            # 复用现有的绑定提示逻辑
-            from core.handle.receiveAudioHandle import check_bind_device
-
-            asyncio.create_task(check_bind_device(self))
+        """组件尚未就绪时丢弃消息（本地部署无需设备绑定，不播放提示音）"""
+        self.logger.bind(tag=TAG).debug("组件初始化中，丢弃消息")
 
     async def _route_message(self, message):
         """消息路由"""
@@ -580,54 +535,6 @@ class ConnectionHandler:
         if not hasattr(conn, "_connection_opus_decoder"):
             conn._connection_opus_decoder = opuslib_next.Decoder(16000, 1)
 
-    async def handle_restart(self, message):
-        """处理服务器重启请求"""
-        try:
-
-            self.logger.bind(tag=TAG).info("收到服务器重启指令，准备执行...")
-
-            # 发送确认响应
-            await self.websocket.send(
-                json.dumps(
-                    {
-                        "type": "server",
-                        "status": "success",
-                        "message": "服务器重启中...",
-                        "content": {"action": "restart"},
-                    }
-                )
-            )
-
-            # 异步执行重启操作
-            def restart_server():
-                """实际执行重启的方法"""
-                time.sleep(1)
-                self.logger.bind(tag=TAG).info("执行服务器重启...")
-                subprocess.Popen(
-                    [sys.executable, "app.py"],
-                    stdin=sys.stdin,
-                    stdout=sys.stdout,
-                    stderr=sys.stderr,
-                    start_new_session=True,
-                )
-                os._exit(0)
-
-            # 使用线程执行重启避免阻塞事件循环
-            threading.Thread(target=restart_server, daemon=True).start()
-
-        except Exception as e:
-            self.logger.bind(tag=TAG).error(f"重启失败: {str(e)}")
-            await self.websocket.send(
-                json.dumps(
-                    {
-                        "type": "server",
-                        "status": "error",
-                        "message": f"Restart failed: {str(e)}",
-                        "content": {"action": "restart"},
-                    }
-                )
-            )
-
     def _initialize_components(self):
         try:
             if self.tts is None:
@@ -660,8 +567,6 @@ class ConnectionHandler:
             if self.asr is None:
                 self.asr = self._initialize_asr()
 
-            # 初始化声纹识别
-            self._initialize_voiceprint()
             # 打开语音识别通道
             asyncio.run_coroutine_threadsafe(
                 self.asr.open_audio_channels(self), self.loop
@@ -671,8 +576,6 @@ class ConnectionHandler:
             self._initialize_memory()
             """加载意图识别"""
             self._initialize_intent()
-            """初始化上报线程"""
-            self._init_report_threads()
             """更新系统提示词"""
             self._init_prompt_enhancement()
             """注入工具调用few-shot示例（仅function_call模式）"""
@@ -755,19 +658,6 @@ class ConnectionHandler:
 
         self.logger.bind(tag=TAG).debug("已注入工具调用 few-shot 示例")
 
-    def _init_report_threads(self):
-        """初始化ASR和TTS上报线程"""
-        if not self.read_config_from_api or self.need_bind:
-            return
-        if self.chat_history_conf == 0:
-            return
-        if self.report_thread is None or not self.report_thread.is_alive():
-            self.report_thread = threading.Thread(
-                target=self._report_worker, daemon=True
-            )
-            self.report_thread.start()
-            self.logger.bind(tag=TAG).info("TTS上报线程已启动")
-
     def _initialize_tts(self):
         """初始化TTS"""
         tts = None
@@ -796,22 +686,6 @@ class ConnectionHandler:
 
         return asr
 
-    def _initialize_voiceprint(self):
-        """为当前连接初始化声纹识别"""
-        try:
-            voiceprint_config = self.config.get("voiceprint", {})
-            if voiceprint_config:
-                voiceprint_provider = VoiceprintProvider(voiceprint_config)
-                if voiceprint_provider is not None and voiceprint_provider.enabled:
-                    self.voiceprint_provider = voiceprint_provider
-                    self.logger.bind(tag=TAG).info("声纹识别功能已在连接时动态启用")
-                else:
-                    self.logger.bind(tag=TAG).debug("声纹识别功能启用但配置不完整")
-            else:
-                self.logger.bind(tag=TAG).info("声纹识别功能未启用")
-        except Exception as e:
-            self.logger.bind(tag=TAG).warning(f"声纹识别初始化失败: {str(e)}")
-
     async def _background_initialize(self):
         """在后台初始化配置和组件（完全不阻塞主循环）"""
         try:
@@ -823,247 +697,31 @@ class ConnectionHandler:
             self.logger.bind(tag=TAG).error(f"后台初始化失败: {e}")
 
     async def _initialize_private_config_async(self):
-        """从接口异步获取差异化配置（异步版本，不阻塞主循环）"""
-        if not self.read_config_from_api:
-            self.need_bind = False
-            self.bind_completed_event.set()
-            return
-        try:
-            begin_time = time.time()
-            private_config = await get_private_config_from_api(
-                self.config,
-                self.headers.get("device-id"),
-                self.headers.get("client-id", self.headers.get("device-id")),
-            )
-            private_config["delete_audio"] = bool(self.config.get("delete_audio", True))
-            private_config["tts_timeout"] = self.config.get("tts_timeout", 15)
-            self.logger.bind(tag=TAG).info(
-                f"{time.time() - begin_time} 秒，异步获取差异化配置成功: {json.dumps(filter_sensitive_info(private_config), ensure_ascii=False)}"
-            )
-            self.need_bind = False
-            self.bind_completed_event.set()
-        except DeviceNotFoundException as e:
-            self.need_bind = True
-            private_config = {}
-        except DeviceBindException as e:
-            self.need_bind = True
-            self.bind_code = e.bind_code
-            private_config = {}
-        except Exception as e:
-            self.need_bind = True
-            self.logger.bind(tag=TAG).error(f"异步获取差异化配置失败: {e}")
-            private_config = {}
-
-        init_llm, init_tts, init_memory, init_intent = (
-            False,
-            False,
-            False,
-            False,
-        )
-
-        init_vad = check_vad_update(self.common_config, private_config)
-        init_asr = check_asr_update(self.common_config, private_config)
-
-        if init_vad:
-            self.config["VAD"] = private_config["VAD"]
-            self.config["selected_module"]["VAD"] = private_config["selected_module"][
-                "VAD"
-            ]
-        if init_asr:
-            self.config["ASR"] = private_config["ASR"]
-            self.config["selected_module"]["ASR"] = private_config["selected_module"][
-                "ASR"
-            ]
-        if private_config.get("TTS", None) is not None:
-            init_tts = True
-            self.config["TTS"] = private_config["TTS"]
-            self.config["selected_module"]["TTS"] = private_config["selected_module"][
-                "TTS"
-            ]
-        if private_config.get("LLM", None) is not None:
-            init_llm = True
-            self.config["LLM"] = private_config["LLM"]
-            self.config["selected_module"]["LLM"] = private_config["selected_module"][
-                "LLM"
-            ]
-        if private_config.get("VLLM", None) is not None:
-            self.config["VLLM"] = private_config["VLLM"]
-            self.config["selected_module"]["VLLM"] = private_config["selected_module"][
-                "VLLM"
-            ]
-        if private_config.get("Memory", None) is not None:
-            init_memory = True
-            self.config["Memory"] = private_config["Memory"]
-            self.config["selected_module"]["Memory"] = private_config[
-                "selected_module"
-            ]["Memory"]
-        if private_config.get("Intent", None) is not None:
-            init_intent = True
-            self.config["Intent"] = private_config["Intent"]
-            model_intent = private_config.get("selected_module", {}).get("Intent", {})
-            self.config["selected_module"]["Intent"] = model_intent
-            # 加载插件配置
-            if model_intent != "Intent_nointent":
-                plugin_from_server = private_config.get("plugins", {})
-                for plugin, config_str in plugin_from_server.items():
-                    plugin_from_server[plugin] = json.loads(config_str)
-                # 将模块级别的插件配置复制到各具体函数名，
-                # 方便后续 per-function 查找描述、news_sources 等配置
-                for module_name, func_names in module_func_map.items():
-                    if module_name in plugin_from_server:
-                        module_config = plugin_from_server[module_name]
-                        for func_name in func_names:
-                            if func_name not in plugin_from_server:
-                                plugin_from_server[func_name] = module_config
-                self.config["plugins"] = plugin_from_server
-                # 将模块级别的插件名展开为具体函数名
-                expanded_functions = []
-                for plugin_key in plugin_from_server.keys():
-                    if plugin_key in all_function_registry:
-                        expanded_functions.append(plugin_key)
-                    elif plugin_key in module_func_map:
-                        expanded_functions.extend(module_func_map[plugin_key])
-                    else:
-                        expanded_functions.append(plugin_key)
-                self.config["Intent"][self.config["selected_module"]["Intent"]][
-                    "functions"
-                ] = expanded_functions
-        if private_config.get("prompt", None) is not None:
-            self.config["prompt"] = private_config["prompt"]
-        # 获取声纹信息
-        if private_config.get("voiceprint", None) is not None:
-            self.config["voiceprint"] = private_config["voiceprint"]
-        if private_config.get("summaryMemory", None) is not None:
-            self.config["summaryMemory"] = private_config["summaryMemory"]
-        if private_config.get("device_max_output_size", None) is not None:
-            self.max_output_size = int(private_config["device_max_output_size"])
-        if private_config.get("chat_history_conf", None) is not None:
-            self.chat_history_conf = int(private_config["chat_history_conf"])
-        if private_config.get("mcp_endpoint", None) is not None:
-            self.config["mcp_endpoint"] = private_config["mcp_endpoint"]
-        if private_config.get("context_providers", None) is not None:
-            self.config["context_providers"] = private_config["context_providers"]
-
-        # 注入替换词到 TTS 模块配置
-        if private_config.get("correct_words", None) is not None:
-            select_tts_module = self.config["selected_module"]["TTS"]
-            self.config["TTS"][select_tts_module]["correct_words"] = private_config[
-                "correct_words"
-            ]
-
-        # 使用 run_in_executor 在线程池中执行 initialize_modules，避免阻塞主循环
-        try:
-            modules = await self.loop.run_in_executor(
-                None,  # 使用默认线程池
-                initialize_modules,
-                self.logger,
-                private_config,
-                init_vad,
-                init_asr,
-                init_llm,
-                init_tts,
-                init_memory,
-                init_intent,
-            )
-        except Exception as e:
-            self.logger.bind(tag=TAG).error(f"初始化组件失败: {e}")
-            modules = {}
-        if modules.get("tts", None) is not None:
-            self.tts = modules["tts"]
-        if modules.get("vad", None) is not None:
-            self.vad = modules["vad"]
-        if modules.get("asr", None) is not None:
-            self.asr = modules["asr"]
-        if modules.get("llm", None) is not None:
-            self.llm = modules["llm"]
-        if modules.get("intent", None) is not None:
-            self.intent = modules["intent"]
-        if modules.get("memory", None) is not None:
-            self.memory = modules["memory"]
+        """本地单机部署：所有连接共享 config.yaml + data/.config.yaml，无需设备绑定"""
+        self.need_bind = False
+        self.bind_completed_event.set()
 
     def _initialize_memory(self):
+        """初始化记忆模块（DeepFlipper 默认 nomem）"""
         if self.memory is None:
             return
-        """初始化记忆模块"""
         self.memory.init_memory(
             role_id=self.device_id,
             llm=self.llm,
             summary_memory=self.config.get("summaryMemory", None),
-            save_to_file=not self.read_config_from_api,
+            save_to_file=True,
         )
 
-        # 获取记忆总结配置
-        memory_config = self.config["Memory"]
-        memory_type = self.config["Memory"][self.config["selected_module"]["Memory"]][
-            "type"
-        ]
-        # 如果使用 nomen 或 mem_report_only，直接返回
-        if memory_type == "nomem" or memory_type == "mem_report_only":
-            return
-        # 使用 mem_local_short 模式
-        elif memory_type == "mem_local_short":
-            memory_llm_name = memory_config[self.config["selected_module"]["Memory"]][
-                "llm"
-            ]
-            if memory_llm_name and memory_llm_name in self.config["LLM"]:
-                # 如果配置了专用LLM，则创建独立的LLM实例
-                from core.utils import llm as llm_utils
-
-                memory_llm_config = self.config["LLM"][memory_llm_name]
-                memory_llm_type = memory_llm_config.get("type", memory_llm_name)
-                memory_llm = llm_utils.create_instance(
-                    memory_llm_type, memory_llm_config
-                )
-                self.logger.bind(tag=TAG).info(
-                    f"为记忆总结创建了专用LLM: {memory_llm_name}, 类型: {memory_llm_type}"
-                )
-                self.memory.set_llm(memory_llm)
-            else:
-                # 否则使用主LLM
-                self.memory.set_llm(self.llm)
-                self.logger.bind(tag=TAG).info("使用主LLM作为意图识别模型")
-
     def _initialize_intent(self):
+        """初始化意图识别模块：function_call 加载工具，nointent 直接对话"""
         if self.intent is None:
             return
         self.intent_type = self.config["Intent"][
             self.config["selected_module"]["Intent"]
         ]["type"]
-        if self.intent_type == "function_call" or self.intent_type == "intent_llm":
-            self.load_function_plugin = True
-        """初始化意图识别模块"""
-        # 获取意图识别配置
-        intent_config = self.config["Intent"]
-        intent_type = self.config["Intent"][self.config["selected_module"]["Intent"]][
-            "type"
-        ]
-
-        # 如果使用 nointent，直接返回
-        if intent_type == "nointent":
+        if self.intent_type != "function_call":
             return
-        # 使用 intent_llm 模式
-        elif intent_type == "intent_llm":
-            intent_llm_name = intent_config[self.config["selected_module"]["Intent"]][
-                "llm"
-            ]
-
-            if intent_llm_name and intent_llm_name in self.config["LLM"]:
-                # 如果配置了专用LLM，则创建独立的LLM实例
-                from core.utils import llm as llm_utils
-
-                intent_llm_config = self.config["LLM"][intent_llm_name]
-                intent_llm_type = intent_llm_config.get("type", intent_llm_name)
-                intent_llm = llm_utils.create_instance(
-                    intent_llm_type, intent_llm_config
-                )
-                self.logger.bind(tag=TAG).info(
-                    f"为意图识别创建了专用LLM: {intent_llm_name}, 类型: {intent_llm_type}"
-                )
-                self.intent.set_llm(intent_llm)
-            else:
-                # 否则使用主LLM
-                self.intent.set_llm(self.llm)
-                self.logger.bind(tag=TAG).info("使用主LLM作为意图识别模型")
+        self.load_function_plugin = True
 
         """加载统一工具处理器"""
         self.func_handler = UnifiedToolHandler(self)
@@ -1084,26 +742,30 @@ class ConnectionHandler:
         current_sentence_id = None
 
         if query is not None:
-            self.logger.bind(tag=TAG).info(f"大模型收到用户消息: {query}")
+            self.logger.bind(tag=TAG).info(f"收到用户消息: {query}")
 
         # 为最顶层时新建会话ID和发送FIRST请求
         if depth == 0:
             current_sentence_id = str(uuid.uuid4().hex)
+            # 上一轮设备要求确认的危险按键，只能在紧接着的这一轮由用户确认
+            flipper_screen.start_turn(self, current_sentence_id)
             self.sentence_id = current_sentence_id  # 更新共享属性
             self.dialogue.put(Message(role="user", content=query))
             self.tts.tts_text_queue.put(
-                TTSMessageDTO(
-                    sentence_id=current_sentence_id,
-                    sentence_type=SentenceType.FIRST,
-                    content_type=ContentType.ACTION,
-                )
+                TTSMessageDTO(current_sentence_id, SentenceType.FIRST, ContentType.ACTION)
             )
+            if self._handle_direct_song(query, current_sentence_id):
+                return True
+            # Cloud TTS: open the voice connection while the LLM is thinking.
+            prewarm = getattr(self.tts, 'prewarm', None)
+            if prewarm is not None:
+                prewarm()
         else:
             # 递归调用时，使用当前的sentence_id
             current_sentence_id = self.sentence_id
 
-        # 设置最大递归深度，避免无限循环，可根据实际需求调整
-        MAX_DEPTH = 5
+        # 最大工具调用轮数（config.yaml 的 max_tool_rounds），避免无限循环
+        MAX_DEPTH = self._max_tool_rounds()
         force_final_answer = False  # 标记是否强制最终回答
 
         if depth >= MAX_DEPTH:
@@ -1153,12 +815,15 @@ class ConnectionHandler:
                 self.system_introduced_speakers.add(cs)
                 speaker_for_system = cs
 
+            # 只有支持看图的模型才发送最新一张截图，其余都换成文字占位
+            max_images = 1 if self._llm_supports_vision() else 0
             if self.intent_type == "function_call" and functions is not None:
                 # 使用支持functions的streaming接口
                 llm_responses = self.llm.response_with_functions(
                     self.session_id,
                     self.dialogue.get_llm_dialogue_with_memory(
-                        memory_str, self.config.get("voiceprint", {}), speaker_for_system
+                        memory_str, self.config.get("voiceprint", {}), speaker_for_system,
+                        max_images=max_images,
                     ),
                     functions=functions,
                 )
@@ -1166,7 +831,8 @@ class ConnectionHandler:
                 llm_responses = self.llm.response(
                     self.session_id,
                     self.dialogue.get_llm_dialogue_with_memory(
-                        memory_str, self.config.get("voiceprint", {}), speaker_for_system
+                        memory_str, self.config.get("voiceprint", {}), speaker_for_system,
+                        max_images=max_images,
                     ),
                 )
         except Exception as e:
@@ -1179,6 +845,7 @@ class ConnectionHandler:
         tool_calls_list = []  # 格式: [{"id": "", "name": "", "arguments": ""}]
         content_arguments = ""
         emotion_flag = True
+        emotion_text = ""
         try:
             for response in llm_responses:
                 if self.client_abort:
@@ -1225,15 +892,20 @@ class ConnectionHandler:
                 else:
                     content = response
 
-                # 在llm回复中获取情绪表情，一轮对话只在开头获取一次
-                if emotion_flag and content is not None and content.strip():
-                    if (self.features or {}).get("emoji", True):
-                        asyncio.run_coroutine_threadsafe(
-                            textUtils.get_emotion(self, content),
-                            self.loop,
-                        )
-                    emotion_flag = False
+                # 按第一句话判断情绪（一轮只发一次）；单个流式片段太短，先攒一点
+                if emotion_flag and content:
+                    emotion_text += content
+                    if len(emotion_text) >= 12 or any(p in content for p in "。！？!?，,"):
+                        if (self.features or {}).get("emoji", True):
+                            asyncio.run_coroutine_threadsafe(
+                                textUtils.get_emotion(self, emotion_text),
+                                self.loop,
+                            )
+                        emotion_flag = False
 
+                if content:
+                    # Never speak or store emoji: the pixel screen can't draw them.
+                    content = textUtils.strip_emoji(content)
                 if content is not None and len(content) > 0:
                     if not tool_call_flag:
                         response_message.append(content)
@@ -1324,6 +996,8 @@ class ConnectionHandler:
                             da_response = self._clean_response_garbage(da_response)
                             self.tts.store_tts_text(current_sentence_id, da_response)
                             self.dialogue.put(Message(role="assistant", content=da_response))
+                            if da_response:
+                                self.turn_spoken_sentence = current_sentence_id
 
                     if not real_tool_calls:
                         if depth == 0:
@@ -1356,7 +1030,12 @@ class ConnectionHandler:
                             content_type=ContentType.ACTION,
                         )
                     )
+                    if streamed_text.strip():
+                        self.turn_spoken_sentence = current_sentence_id
                 response_message.clear()
+
+                # 操作 Flipper 界面要按好几轮键：本轮还没出声时先说一句，避免冷场
+                self._maybe_speak_ui_progress(tool_calls_list, current_sentence_id)
 
                 # 收集所有工具调用的 Future
                 futures_with_data = []
@@ -1386,6 +1065,9 @@ class ConnectionHandler:
                     try:
                         result = future.result(timeout=tool_call_timeout)
                         tool_results.append((result, tool_call_data))
+                        record_tool(self, tool_call_data['name'], tool_input,
+                                    result.result if result.result is not None else result.response,
+                                    getattr(result, "screen_png", None))
                         # 使用公共方法上报工具调用结果
                         enqueue_tool_report(self, tool_call_data['name'], tool_input, str(result.result) if result.result else None, report_tool_call=False)
 
@@ -1400,6 +1082,8 @@ class ConnectionHandler:
                         ))
                         # 上报工具调用错误
                         enqueue_tool_report(self, tool_call_data['name'], tool_input, str(e), report_tool_call=False)
+                        record_tool(self, tool_call_data['name'], tool_input,
+                                    json.dumps({"ok": False, "code": "timeout_or_error"}))
 
                 # 统一处理工具调用结果
                 if tool_results:
@@ -1428,6 +1112,98 @@ class ConnectionHandler:
 
         return True
 
+    def _handle_direct_song(self, query, sentence_id):
+        if not self.config.get("singing", {}).get("enabled", True) or not query:
+            return False
+        from plugins_func.functions.sing_song import requested_song, sing_song, take_offer, answer_offer
+
+        # “练好啦，要不要现在听？”之后的回答：要/好 → 直接唱，不用 → 留着
+        reply = take_offer(self, query)
+        if reply:
+            kind, offer = reply
+            tool_call = {"name": "sing_song", "id": uuid.uuid4().hex,
+                         "arguments": json.dumps({"song": offer["title"]}, ensure_ascii=False)}
+            self.logger.bind(tag=TAG).info("回答要不要听《{}》：{}", offer["title"], kind)
+            result = answer_offer(self, kind, offer)
+            record_tool(self, "sing_song", {"song": offer["title"]}, result.result or result.response)
+            if self.sentence_id == sentence_id and not self.client_abort and not self.stop_event.is_set():
+                self._handle_function_result([(result, tool_call)], depth=0)
+                self.tts.tts_text_queue.put(
+                    TTSMessageDTO(sentence_id, SentenceType.LAST, ContentType.ACTION)
+                )
+            return True
+
+        song = requested_song(query)
+        if not song:
+            return False
+        tool_call = {"name": "sing_song", "id": uuid.uuid4().hex,
+                     "arguments": json.dumps({"song": song}, ensure_ascii=False)}
+        self.logger.bind(tag=TAG).info("直接点歌：{}", song)
+        future = asyncio.run_coroutine_threadsafe(sing_song(self, song=song), self.loop)
+        try:
+            result = future.result(timeout=int(self.config.get("tool_call_timeout", 30)))
+        except Exception as error:
+            future.cancel()
+            self.logger.bind(tag=TAG).warning("点歌请求失败：{}", type(error).__name__)
+            result = ActionResponse(action=Action.ERROR, result="点歌请求没完成，请再试一次。")
+        record_tool(self, "sing_song", {"song": song}, result.result or result.response)
+        if self.sentence_id == sentence_id and not self.client_abort and not self.stop_event.is_set():
+            self._handle_function_result([(result, tool_call)], depth=0)
+            self.tts.tts_text_queue.put(
+                TTSMessageDTO(sentence_id, SentenceType.LAST, ContentType.ACTION)
+            )
+        return True
+
+    def _max_tool_rounds(self):
+        """config.yaml 的 max_tool_rounds：一次回答里最多连续调用几轮工具（1–64，默认 24）"""
+        try:
+            rounds = int(self.config.get("max_tool_rounds", 24))
+        except (TypeError, ValueError):
+            rounds = 24
+        return max(1, min(64, rounds))
+
+    def _llm_config(self):
+        selected = (self.config.get("selected_module") or {}).get("LLM")
+        llm_config = dict((self.config.get("LLM") or {}).get(selected) or {})
+        if not llm_config.get("model_name"):
+            llm_config["model_name"] = getattr(self.llm, "model_name", "") or ""
+        return llm_config
+
+    def _llm_supports_vision(self):
+        """LLM 配置 vision: auto|true|false；auto 按模型名判断能否看图"""
+        try:
+            return flipper_screen.is_vision_model(self._llm_config())
+        except Exception:
+            return False
+
+    def _maybe_speak_ui_progress(self, tool_calls, sentence_id):
+        """本轮第一次操作 Flipper 界面且还没说过话时，先播一句短语（ui_progress_voice）"""
+        if not self.config.get("ui_progress_voice", True):
+            return
+        if getattr(self, "turn_spoken_sentence", None) == sentence_id:
+            return
+        if not any(tc.get("name") in flipper_screen.UI_TOOLS for tc in tool_calls):
+            return
+        text = str(self.config.get("ui_progress_text") or "好，我来操作一下。")
+        # 只说一次：后续轮次不再重复
+        self.turn_spoken_sentence = sentence_id
+        self.tts.tts_text_queue.put(
+            TTSMessageDTO(
+                sentence_id=sentence_id,
+                sentence_type=SentenceType.MIDDLE,
+                content_type=ContentType.TEXT,
+                content_detail=text,
+            )
+        )
+        # 立即合成播放这句（不等整轮结束）；不写入对话历史，避免模型重复
+        self.tts.tts_text_queue.put(
+            TTSMessageDTO(
+                sentence_id=sentence_id,
+                sentence_type=SentenceType.MIDDLE,
+                content_type=ContentType.ACTION,
+            )
+        )
+
     def _handle_function_result(self, tool_results, depth, streamed_text=""):
         need_llm_tools = []
         record_tools = []
@@ -1438,7 +1214,7 @@ class ConnectionHandler:
                 Action.NOTFOUND,
                 Action.ERROR,
             ]:
-                text = result.response if result.response else result.result
+                text = (result.response if result.response else result.result) or ""
                 if streamed_text and text in streamed_text:
                     self.logger.bind(tag=TAG).debug(
                         f"Skipping duplicate TTS for tool {tool_call_data['name']}, already streamed"
@@ -1446,6 +1222,8 @@ class ConnectionHandler:
                 else:
                     self.tts.tts_one_sentence(self, ContentType.TEXT, content_detail=text)
                     self.tts.store_tts_text(self.sentence_id, text)
+                    if text.strip():
+                        self.turn_spoken_sentence = self.sentence_id
                 self.dialogue.put(Message(role="assistant", content=text))
             elif result.action == Action.REQLLM:
                 need_llm_tools.append((result, tool_call_data))
@@ -1519,9 +1297,14 @@ class ConnectionHandler:
             ]
             self.dialogue.put(Message(role="assistant", tool_calls=all_tool_calls))
 
+            vision = self._llm_supports_vision()
             for result, tool_call_data in need_llm_tools:
                 text = result.result
                 if text is not None and len(text) > 0:
+                    # 带截图的 Flipper 结果：看图模型收到 [文字, 图片]，其他模型只收到文字
+                    content = flipper_screen.tool_message_content(
+                        text, getattr(result, "screen_png", None), vision
+                    )
                     self.dialogue.put(
                         Message(
                             role="tool",
@@ -1530,45 +1313,11 @@ class ConnectionHandler:
                                 if tool_call_data["id"] is None
                                 else tool_call_data["id"]
                             ),
-                            content=text,
+                            content=content,
                         )
                     )
 
             self.chat(None, depth=depth + 1)
-
-    def _report_worker(self):
-        """聊天记录上报工作线程"""
-        while not self.stop_event.is_set():
-            try:
-                # 从队列获取数据，设置超时以便定期检查停止事件
-                item = self.report_queue.get(timeout=1)
-                if item is None:  # 检测毒丸对象
-                    break
-                try:
-                    # 检查线程池状态
-                    if self.executor is None:
-                        continue
-                    # 提交任务到线程池
-                    self.executor.submit(self._process_report, *item)
-                except Exception as e:
-                    self.logger.bind(tag=TAG).error(f"聊天记录上报线程异常: {e}")
-            except queue.Empty:
-                continue
-            except Exception as e:
-                self.logger.bind(tag=TAG).error(f"聊天记录上报工作线程异常: {e}")
-
-        self.logger.bind(tag=TAG).info("聊天记录上报线程已退出")
-
-    def _process_report(self, type, text, audio_data, report_time):
-        """处理上报任务"""
-        try:
-            # 执行异步上报（在事件循环中运行）
-            asyncio.run(report(self, type, text, audio_data, report_time))
-        except Exception as e:
-            self.logger.bind(tag=TAG).error(f"上报处理异常: {e}")
-        finally:
-            # 标记任务完成
-            self.report_queue.task_done()
 
     def clearSpeakStatus(self):
         self.client_is_speaking = False
@@ -1707,7 +1456,6 @@ class ConnectionHandler:
             for q in [
                 self.tts.tts_text_queue,
                 self.tts.tts_audio_queue,
-                self.report_queue,
             ]:
                 if not q:
                     continue
@@ -1763,7 +1511,8 @@ class ConnectionHandler:
                     last_activity_time = self.first_activity_time
 
                 # 检查是否超时（只有在时间戳已初始化的情况下）
-                if last_activity_time > 0.0:
+                held = float(getattr(self, "singing_hold_until", 0) or 0) > time.time()
+                if last_activity_time > 0.0 and not held:
                     current_time = time.time() * 1000
                     if current_time - last_activity_time > self.timeout_seconds * 1000:
                         if not self.stop_event.is_set():

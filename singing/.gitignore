@@ -1,0 +1,13 @@
+# 本地环境、模型、歌曲和成品都不进 git（歌曲有版权，模型很大）
+venv/
+models/*
+!models/.gitkeep
+songs_in/*
+!songs_in/.gitkeep
+cache/
+dataset/
+training/
+token.txt
+worker.log
+config.local.yaml
+__pycache__/

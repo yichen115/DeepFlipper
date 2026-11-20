@@ -1,0 +1,13 @@
+# DeepFlipper singing worker (Windows, NVIDIA GPU). Installed by setup_windows.ps1 AFTER
+# torch==2.11.0 / torchvision==0.26.0 / torchaudio==2.11.0 from https://download.pytorch.org/whl/cu128
+audio-separator[gpu]==0.48.0
+infer-rvc-python==1.3.1
+torch==2.11.0
+torchvision==0.26.0
+torchaudio==2.11.0
+transformers==5.13.1
+aiohttp>=3.9,<4
+PyYAML>=6.0
+# Optional: download a song from a link given in the admin page (B 站 / YouTube ...).
+yt-dlp>=2025.1.1
+# Install with uv and dependency-overrides.txt (pyworld / torchcrepe compatibility).

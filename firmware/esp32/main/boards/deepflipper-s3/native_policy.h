@@ -1,5 +1,7 @@
 #pragma once
+#include <cctype>
 #include <string>
+#include <vector>
 
 namespace dfnative {
 inline bool Path(const std::string& value, const std::string& root = "/ext") {
@@ -67,5 +69,70 @@ inline int Key(const std::string& name) {
         if (name == keys[i])
             return i;
     return -1;
+}
+// Key indexes as used by Key()/the short_key transport argument.
+enum : int { kUp = 0, kDown = 1, kRight = 2, kLeft = 3, kOk = 4, kBack = 5 };
+
+// "down,down,ok,back:long" -> {key, long} pairs; empty on any invalid token.
+struct KeyPress {
+    int key;
+    bool hold;
+};
+inline std::vector<KeyPress> Keys(const std::string& text, size_t maximum = 16) {
+    std::vector<KeyPress> out;
+    std::string token;
+    auto take = [&]() {
+        if (token.empty())
+            return true;
+        bool hold = false;
+        auto colon = token.find(':');
+        if (colon != std::string::npos) {
+            if (token.substr(colon + 1) != "long")
+                return false;
+            hold = true;
+            token.resize(colon);
+        }
+        for (auto& c : token)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        int key = Key(token);
+        token.clear();
+        if (key < 0 || out.size() >= maximum)
+            return false;
+        out.push_back({key, hold});
+        return true;
+    };
+    for (char c : text) {
+        if (c == ',' || c == ' ' || c == ';') {
+            if (!take())
+                return {};
+        } else
+            token += c;
+    }
+    if (!take())
+        return {};
+    return out;
+}
+
+// Labels whose activation sends RF/IR, emulates, writes, deletes or runs payloads.
+inline bool Dangerous(const std::string& label) {
+    static const char* words[] = {"send",  "transmit", "tx",   "emulate", "write",
+                                  "delete", "erase",    "format", "brute", "bruteforce",
+                                  "wipe",  "jam",      "run",  "flash",   "reset"};
+    std::string word;
+    auto check = [&]() {
+        bool hit = false;
+        for (auto w : words)
+            if (word == w)
+                hit = true;
+        word.clear();
+        return hit;
+    };
+    for (unsigned char c : label) {
+        if (std::isalnum(c))
+            word += static_cast<char>(std::tolower(c));
+        else if (check())
+            return true;
+    }
+    return check();
 }
 }  // namespace dfnative

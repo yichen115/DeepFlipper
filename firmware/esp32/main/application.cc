@@ -672,6 +672,20 @@ void Application::InitializeProtocol() {
                       subtitles = std::move(subtitles)]() mutable {
                 StartNotification(std::move(url), std::move(subtitles));
             });
+        } else if (strcmp(type->valuestring, "listen") == 0) {
+            // Server-side follow-up window ended without speech: go quiet, no ASR request.
+            auto state = cJSON_GetObjectItem(root, "state");
+            if (cJSON_IsString(state) && strcmp(state->valuestring, "stop") == 0) {
+                Schedule([this]() {
+                    if (GetDeviceState() != kDeviceStateListening)
+                        return;
+                    audio_service_.EnableVoiceProcessing(false);
+                    while (audio_service_.PopPacketFromSendQueue()) {
+                    }
+                    listening_mode_ = kListeningModeManualStop;
+                    SetDeviceState(kDeviceStateIdle);
+                });
+            }
         } else if (strcmp(type->valuestring, "tts") == 0) {
             auto state = cJSON_GetObjectItem(root, "state");
             if (!cJSON_IsString(state)) {
@@ -688,7 +702,18 @@ void Application::InitializeProtocol() {
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
                 audio_service_.EndNetworkPlayback();
-                Schedule([this]() { RequestSpeechStop(); });
+                // "listen": "auto" — the server expects an answer (continuous conversation,
+                // or a question such as "want to hear the song now?"): listen after playback.
+                auto listen = cJSON_GetObjectItem(root, "listen");
+                const bool follow_up = cJSON_IsString(listen) && strcmp(listen->valuestring, "auto") == 0;
+                Schedule([this, follow_up]() {
+                    if (follow_up && listening_mode_ == kListeningModeManualStop)
+                        listening_mode_ = kListeningModeAutoStop;
+                    else if (!follow_up && listening_mode_ == kListeningModeAutoStop &&
+                             protocol_ && !protocol_->continuous())
+                        listening_mode_ = kListeningModeManualStop;
+                    RequestSpeechStop();
+                });
             } else if (strcmp(state->valuestring, "sentence_start") == 0) {
                 auto text = cJSON_GetObjectItem(root, "text");
                 if (cJSON_IsString(text)) {
@@ -697,7 +722,7 @@ void Application::InitializeProtocol() {
                     if (!TextGlyphPayload::Parse(root, glyphs, bpp)) {
                         glyphs.clear();
                     }
-                    ESP_LOGI(TAG, "<< %s", text->valuestring);
+                    ESP_LOGD(TAG, "<< %s", text->valuestring);
                     Schedule([display, message = std::string(text->valuestring),
                               glyphs = std::move(glyphs), bpp]() {
                         display->AddTextGlyphs(glyphs, bpp);
@@ -713,7 +738,7 @@ void Application::InitializeProtocol() {
                 if (!TextGlyphPayload::Parse(root, glyphs, bpp)) {
                     glyphs.clear();
                 }
-                ESP_LOGI(TAG, ">> %s", text->valuestring);
+                ESP_LOGD(TAG, ">> %s", text->valuestring);
                 Schedule([display, message = std::string(text->valuestring),
                           glyphs = std::move(glyphs), bpp]() {
                     display->AddTextGlyphs(glyphs, bpp);
@@ -901,6 +926,9 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
         }
     }
 
+    // The server hello just told us whether this session is a continuous conversation.
+    if (mode == kListeningModeManualStop && protocol_->continuous())
+        mode = kListeningModeAutoStop;
     SetListeningMode(mode);
 }
 
@@ -933,10 +961,10 @@ void Application::HandleStartListeningEvent() {
             Schedule([this]() { ContinueOpenAudioChannel(kListeningModeManualStop); });
             return;
         }
-        SetListeningMode(kListeningModeManualStop);
+        SetListeningMode(protocol_->continuous() ? kListeningModeAutoStop : kListeningModeManualStop);
     } else if (state == kDeviceStateSpeaking) {
         AbortSpeaking(kAbortReasonNone);
-        SetListeningMode(kListeningModeManualStop);
+        SetListeningMode(protocol_->continuous() ? kListeningModeAutoStop : kListeningModeManualStop);
     }
 }
 

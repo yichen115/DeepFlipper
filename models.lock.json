@@ -1,30 +1,18 @@
 {
   "format": 1,
-  "purpose": "CPU local voice server: SenseVoice ASR, Silero VAD and MeloTTS",
+  "purpose": "CPU local voice server: SenseVoice int8 ASR (sherpa-onnx), Silero VAD and MeloTTS",
   "files": [
     {
-      "path": "server/main/xiaozhi-server/models/SenseVoiceSmall/model.pt",
-      "url": "https://modelscope.cn/models/iic/SenseVoiceSmall/resolve/master/model.pt",
-      "sha256": "833ca2dcfdf8ec91bd4f31cfac36d6124e0c459074d5e909aec9cabe6204a3ea",
-      "bytes": 936291369
+      "path": "server/main/xiaozhi-server/models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/model.int8.onnx",
+      "url": "https://modelscope.cn/models/pengzhendong/sherpa-onnx-sense-voice-zh-en-ja-ko-yue/resolve/73eca47697f980daa3d16112404174b6b950b514/model.int8.onnx",
+      "sha256": "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51",
+      "bytes": 239233841
     },
     {
-      "path": "server/main/xiaozhi-server/models/SenseVoiceSmall/config.yaml",
-      "url": "https://raw.githubusercontent.com/xinnan-tech/xiaozhi-esp32-server/f1965167cc2993556cd3e963f8657e2686006c77/main/xiaozhi-server/models/SenseVoiceSmall/config.yaml",
-      "sha256": "f71e239ba36705564b5bf2d2ffd07eece07b8e3f2bbf6d2c99d8df856339ac19",
-      "bytes": 1855
-    },
-    {
-      "path": "server/main/xiaozhi-server/models/SenseVoiceSmall/configuration.json",
-      "url": "https://raw.githubusercontent.com/xinnan-tech/xiaozhi-esp32-server/f1965167cc2993556cd3e963f8657e2686006c77/main/xiaozhi-server/models/SenseVoiceSmall/configuration.json",
-      "sha256": "02810a7f8e9e8aee10370a265f7e799728ce25b4c00cdbf4602b303ee395a38e",
-      "bytes": 396
-    },
-    {
-      "path": "server/main/xiaozhi-server/models/SenseVoiceSmall/chn_jpn_yue_eng_ko_spectok.bpe.model",
-      "url": "https://raw.githubusercontent.com/xinnan-tech/xiaozhi-esp32-server/f1965167cc2993556cd3e963f8657e2686006c77/main/xiaozhi-server/models/SenseVoiceSmall/chn_jpn_yue_eng_ko_spectok.bpe.model",
-      "sha256": "aa87f86064c3730d799ddf7af3c04659151102cba548bce325cf06ba4da4e6a8",
-      "bytes": 377341
+      "path": "server/main/xiaozhi-server/models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/tokens.txt",
+      "url": "https://modelscope.cn/models/pengzhendong/sherpa-onnx-sense-voice-zh-en-ja-ko-yue/resolve/73eca47697f980daa3d16112404174b6b950b514/tokens.txt",
+      "sha256": "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc",
+      "bytes": 315894
     },
     {
       "path": "server/main/xiaozhi-server/models/snakers4_silero-vad/src/silero_vad/data/silero_vad.onnx",

@@ -26,6 +26,7 @@ typedef struct {
     bool microphone;
     uint8_t volume;
     uint8_t battery;
+    bool charging;
     uint8_t mouth;
     uint8_t emotion;
     DeepFlipperState state;

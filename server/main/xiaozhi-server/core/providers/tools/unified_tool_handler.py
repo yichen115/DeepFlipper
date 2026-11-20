@@ -9,15 +9,13 @@ from .base import ToolType
 from plugins_func.register import Action, ActionResponse
 from .unified_tool_manager import ToolManager
 from .server_plugins import ServerPluginExecutor
-from .server_mcp import ServerMCPExecutor
 from .device_iot import DeviceIoTExecutor
 from .device_mcp import DeviceMCPExecutor
-from .mcp_endpoint import MCPEndpointExecutor
 from core.handle.sendAudioHandle import send_display_message
 
 
 class UnifiedToolHandler:
-    """统一工具处理器"""
+    """统一工具处理器：服务端插件 + 设备端 IoT/MCP 工具"""
 
     def __init__(self, conn):
         self.conn = conn
@@ -29,26 +27,18 @@ class UnifiedToolHandler:
 
         # 创建各类执行器
         self.server_plugin_executor = ServerPluginExecutor(conn)
-        self.server_mcp_executor = ServerMCPExecutor(conn)
         self.device_iot_executor = DeviceIoTExecutor(conn)
         self.device_mcp_executor = DeviceMCPExecutor(conn)
-        self.mcp_endpoint_executor = MCPEndpointExecutor(conn)
 
         # 注册执行器
         self.tool_manager.register_executor(
             ToolType.SERVER_PLUGIN, self.server_plugin_executor
         )
         self.tool_manager.register_executor(
-            ToolType.SERVER_MCP, self.server_mcp_executor
-        )
-        self.tool_manager.register_executor(
             ToolType.DEVICE_IOT, self.device_iot_executor
         )
         self.tool_manager.register_executor(
             ToolType.DEVICE_MCP, self.device_mcp_executor
-        )
-        self.tool_manager.register_executor(
-            ToolType.MCP_ENDPOINT, self.mcp_endpoint_executor
         )
 
         # 初始化标志
@@ -60,15 +50,6 @@ class UnifiedToolHandler:
             # 自动导入插件模块
             auto_import_modules("plugins_func.functions")
 
-            # 初始化服务端MCP
-            await self.server_mcp_executor.initialize()
-
-            # 初始化MCP接入点
-            await self._initialize_mcp_endpoint()
-
-            # 初始化Home Assistant（如果需要）
-            self._initialize_home_assistant()
-
             self.finish_init = True
             self.logger.debug("统一工具处理器初始化完成")
 
@@ -77,45 +58,6 @@ class UnifiedToolHandler:
 
         except Exception as e:
             self.logger.error(f"统一工具处理器初始化失败: {e}")
-
-    async def _initialize_mcp_endpoint(self):
-        """初始化MCP接入点"""
-        try:
-            from .mcp_endpoint import connect_mcp_endpoint
-
-            # 从配置中获取MCP接入点URL
-            mcp_endpoint_url = self.config.get("mcp_endpoint", "")
-
-            if (
-                mcp_endpoint_url
-                and "你的" not in mcp_endpoint_url
-                and mcp_endpoint_url != "null"
-            ):
-                self.logger.info(f"正在初始化MCP接入点: {mcp_endpoint_url}")
-                mcp_endpoint_client = await connect_mcp_endpoint(
-                    mcp_endpoint_url, self.conn
-                )
-
-                if mcp_endpoint_client:
-                    # 将MCP接入点客户端保存到连接对象中
-                    self.conn.mcp_endpoint_client = mcp_endpoint_client
-                    self.logger.info("MCP接入点初始化成功")
-                else:
-                    self.logger.warning("MCP接入点初始化失败")
-
-        except Exception as e:
-            self.logger.error(f"初始化MCP接入点失败: {e}")
-
-    def _initialize_home_assistant(self):
-        """初始化Home Assistant提示词"""
-        try:
-            from plugins_func.functions.hass_init import append_devices_to_prompt
-
-            append_devices_to_prompt(self.conn)
-        except ImportError:
-            pass  # 忽略导入错误
-        except Exception as e:
-            self.logger.error(f"初始化Home Assistant失败: {e}")
 
     def get_functions(self) -> List[Dict[str, Any]]:
         """获取所有工具的函数描述"""
@@ -226,17 +168,5 @@ class UnifiedToolHandler:
         return self.tool_manager.get_tool_statistics()
 
     async def cleanup(self):
-        """清理资源"""
-        try:
-            await self.server_mcp_executor.cleanup()
-
-            # 清理MCP接入点连接
-            if (
-                hasattr(self.conn, "mcp_endpoint_client")
-                and self.conn.mcp_endpoint_client
-            ):
-                await self.conn.mcp_endpoint_client.close()
-
-            self.logger.info("工具处理器清理完成")
-        except Exception as e:
-            self.logger.error(f"工具处理器清理失败: {e}")
+        """清理资源（设备端工具随连接释放，无额外资源）"""
+        self.logger.info("工具处理器清理完成")

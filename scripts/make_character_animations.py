@@ -41,6 +41,7 @@ STATES = [
     ('angry', '生气', 16, '生气', ''),
     ('sleeping', '困倦', 24, '困倦', ''),
     ('nod', '点头', 16, '任务完成', ''),
+    ('sing', '唱歌', 32, '唱歌', ''),
 ]
 
 
@@ -150,7 +151,50 @@ def wave_hand(im, offset):
     d.line((14+offset,31,14+offset,33),fill=0)
 
 
+def mic_hand(im, lift):
+    """Raised sleeve and fist holding a handheld mic under her chin; lift raises it 0/1 px."""
+    d = ImageDraw.Draw(im)
+    y = -lift
+    d.polygon([(21,41),(21,45),(18,47),(14,45),(13,42),(16,40),(18,42)],fill=0)
+    # handle with a paper rim so it reads against the apron
+    d.line([(15,45+y),(19,40+y)],fill=1,width=4)
+    d.line([(15,45+y),(19,40+y)],fill=0,width=2)
+    d.ellipse((12,42+y,17,47+y),fill=1,outline=0)
+    d.line((13,44+y,16,44+y),fill=0)
+    # grille head: paper rim, ink ball, four highlights
+    d.ellipse((17,34+y,24,40+y),fill=1)
+    d.ellipse((18,35+y,23,39+y),fill=0)
+    for x, py in ((19,36),(21,36),(20,38),(22,38)):
+        d.point((x,py+y),fill=1)
+
+
+def note(d, x, y):
+    for r, row in enumerate(('.##','.#.','##.','##.')):
+        for c, bit in enumerate(row):
+            if bit == '#':
+                d.point((x+c,y+r),fill=0)
+
+
+def sing_frame(i, count):
+    """32 ticks: mouth changes every other tick, eyes mostly open with one blink and a happy squint."""
+    im = tail_sway(BASE, round(5 * math.sin(i / count * math.tau)))
+    d = ImageDraw.Draw(im)
+    if 9 <= i <= 10:
+        eyes(im, 'half' if i == 9 else 'closed')
+    elif 18 <= i <= 25:
+        eyes(im, 'happy')
+    mouth(im, ['open','o','small','open','open','small','o','closed',
+               'open','small','o','open','small','closed','open','o'][i // 2 % 16])
+    mic_hand(im, 1 if i % 8 < 4 else 0)
+    for x, phase in ((50,0),(55,8)):
+        p = (i // 2 + phase // 2) % 8
+        note(d, x + (p % 2), 14 - p)
+    return translated(im, dx=[0,1,0,-1][i // 4 % 4])
+
+
 def character(state, i, count):
+    if state == 'sing':
+        return sing_frame(i, count)
     phase = i / count
     # Integer angles/positions, no subpixel filtering on firmware artwork.
     angle = round(4 * math.sin(phase * math.tau))
@@ -329,13 +373,13 @@ for state,label,count,title,hint in STATES:
 
 # Four columns of actual 128x64 screen previews, each enlarged 3x.
 def overview(i, static=False):
-    w,h=4*408+24,3*240+96
+    w,h=4*408+24,math.ceil(len(STATES)/4)*240+96
     sheet=Image.new('RGB',(w,h),THEME['background'])
     d=ImageDraw.Draw(sheet)
-    d.text((24,12),'横屏鲸鱼娘 · 12 组动作与表情',font=TITLE_FONT,fill=THEME['text'])
+    d.text((24,12),f'横屏鲸鱼娘 · {len(STATES)} 组动作与表情',font=TITLE_FONT,fill=THEME['text'])
     d.text((24,50),'沿用选定造型与围裙鲸鱼；每格实际 128×64 单色，放大 3 倍。',font=SMALL_FONT,fill=THEME['muted'])
     picks={'idle':17,'listening':6,'thinking':9,'speaking':2,'happy':3,
-           'shy':3,'surprised':2,'wave':3,'sad':8,'angry':3,'sleeping':9,'nod':5}
+           'shy':3,'surprised':2,'wave':3,'sad':8,'angry':3,'sleeping':9,'nod':5,'sing':4}
     for k,(state,label,count,_,_) in enumerate(STATES):
         x,y=24+(k%4)*408,88+(k//4)*240
         d.text((x,y),label,font=LABEL_FONT,fill=THEME['text'])
@@ -376,7 +420,7 @@ gif([overview(i) for i in range(48)],OUT/'animated_overview.gif')
 
 
 def character_overview(i):
-    sheet=Image.new('RGB',(888,808),THEME['background'])
+    sheet=Image.new('RGB',(888,math.ceil(len(STATES)/4)*236+100),THEME['background'])
     d=ImageDraw.Draw(sheet)
     d.text((24,12),'鲸鱼娘 · 动作与表情',font=TITLE_FONT,fill=THEME['text'])
     d.text((24,50),'每个角色为 64×64 单色，放大 3 倍；左侧角色，右侧时间、电量与 AI 状态。',

@@ -29,13 +29,24 @@ EMOJI_MAP = {
     "😏": "confident",
 }
 EMOJI_RANGES = [
-    (0x1F600, 0x1F64F),
-    (0x1F300, 0x1F5FF),
-    (0x1F680, 0x1F6FF),
-    (0x1F900, 0x1F9FF),
-    (0x1FA70, 0x1FAFF),
+    (0x1F000, 0x1FAFF),  # emoticons, symbols, flags, skin tones, extended pictographs
     (0x2600, 0x26FF),
     (0x2700, 0x27BF),
+    (0x2B00, 0x2BFF),  # stars, arrows used as emoji
+    (0xFE00, 0xFE0F),  # variation selectors
+    (0x200D, 0x200D),  # zero-width joiner
+    (0x20E3, 0x20E3),  # keycap
+]
+# The Flipper's 1-bit screen cannot draw emoji and TTS would read them out, so
+# the whale girl's mood comes from her words. Checked in order; first hit wins.
+EMOTION_KEYWORDS = [
+    ("sad", ("难过", "伤心", "抱歉", "对不起", "呜呜", "可惜", "遗憾", "sorry")),
+    ("angry", ("生气", "哼", "气死")),
+    ("surprised", ("哇", "真的吗", "居然", "竟然", "天哪", "没想到", "wow")),
+    ("embarrassed", ("害羞", "不好意思", "脸红", "嘿嘿")),
+    ("sleepy", ("困了", "好困", "晚安", "睡觉", "打哈欠")),
+    ("thinking", ("让我想想", "我想想", "嗯…", "嗯...", "好像", "也许", "可能是")),
+    ("happy", ("哈哈", "太好了", "好耶", "开心", "高兴", "喜欢", "米饭", "当然", "没问题", "好呀", "好的")),
 ]
 
 
@@ -81,15 +92,23 @@ def is_punctuation_or_emoji(char):
     return is_emoji(char)
 
 
-async def get_emotion(conn: "ConnectionHandler", text):
-    """获取文本内的情绪消息"""
-    emoji = "🙂"
-    emotion = "happy"
+def guess_emotion(text):
+    """Pick an expression for the Flipper from an emoji or, normally, the words."""
     for char in text:
         if char in EMOJI_MAP:
-            emoji = char
-            emotion = EMOJI_MAP[char]
-            break
+            return EMOJI_MAP[char]
+    lowered = text.lower()
+    for emotion, words in EMOTION_KEYWORDS:
+        if any(word in lowered for word in words):
+            return emotion
+    return "neutral"
+
+
+async def get_emotion(conn: "ConnectionHandler", text):
+    """获取文本内的情绪消息"""
+    emotion = guess_emotion(text)
+    # Text stays plain: the device only uses the emotion name.
+    emoji = emotion
     try:
         await conn.websocket.send(
             json.dumps(
@@ -115,3 +134,8 @@ def is_emoji(char):
 def check_emoji(text):
     """去除文本中的所有emoji表情"""
     return "".join(char for char in text if not is_emoji(char) and char != "\n")
+
+
+def strip_emoji(text):
+    """Remove emoji but keep line breaks and spacing (used on LLM output)."""
+    return "".join(char for char in text if not is_emoji(char))

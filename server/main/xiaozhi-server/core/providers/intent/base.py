@@ -24,10 +24,7 @@ class IntentProviderBase(ABC):
         Args:
             dialogue_history: 对话历史记录列表，每条记录包含role和content
         Returns:
-            返回识别出的意图，格式为:
-            - "继续聊天"
-            - "结束聊天"
-            - "播放音乐 歌名" 或 "随机播放音乐"
-            - "查询天气 地点名" 或 "查询天气 [当前位置]"
+            JSON 字符串，例如 '{"function_call": {"name": "continue_chat"}}'
+            表示继续普通对话
         """
         pass

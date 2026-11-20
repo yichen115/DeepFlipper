@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 DEVICE = ROOT / 'server/main/xiaozhi-server/core/providers/tools/device_mcp'
+# The executor imports core.utils.flipper_screen (stdlib only).
+sys.path.insert(0, str(ROOT / 'server/main/xiaozhi-server'))
 
 
 def load_executor(call):
@@ -36,7 +38,8 @@ def load_executor(call):
 class ExecutorTests(unittest.IsolatedAsyncioTestCase):
     async def test_new_native_tools_wait_for_final_device_result(self):
         final = {'ok': True, 'state': 'done', 'stopped': True, 'target_state_verified': False}
-        for tool in ('flipper_run_saved', 'flipper_app_open', 'flipper_list_files', 'flipper_system_info'):
+        for tool in ('flipper_run_saved', 'flipper_app_open', 'flipper_list_files', 'flipper_system_info',
+                     'flipper_app_describe', 'flipper_app_call', 'flipper_app_catalog'):
             with self.subTest(tool=tool):
                 calls = []
                 async def call(conn, client, name, args):

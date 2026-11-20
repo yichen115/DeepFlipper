@@ -6,11 +6,16 @@ let historyClearRequest = null;
 let previewUrl = null;
 let previewGeneration = 0;
 let streamTesting = false;
+let breezeKeySet = false;
+let screenGeneration = 0, screenLoading = false;
 function refreshTts() {
-  const local=$('tts-provider').value==='LocalTTS';
+  const provider=$('tts-provider').value, local=provider==='LocalTTS', breeze=provider==='BreezeTTS';
   $('tts-speed').disabled=!local;
-  $('tts-voice').disabled=local;
-  $('tts-hint').textContent=local?'使用本机 CPU 合成中文／英文，不访问微软接口。首次请运行 python scripts/download_models.py --tts-only。':'EdgeTTS 需要服务器能够连接微软语音服务；网络不可用时建议切换本地合成。';
+  $('tts-voice').disabled=provider!=='EdgeTTS';
+  $('breeze-voice').disabled=!breeze;
+  $('tts-hint').textContent=local?'使用本机 CPU 合成中文／英文，不访问微软接口。首次请运行 python scripts/download_models.py --tts-only。'
+    :breeze?(breezeKeySet?'BreezeBlue 云端合成（大肥鱼音色），边合成边播放；云端失败时本轮自动改用本地 MeloTTS。':'尚未配置 BreezeBlue API Key：写入 data/server.env 的 BREEZE_API_KEY 后重启服务。')
+    :'EdgeTTS 需要服务器能够连接微软语音服务；网络不可用时建议切换本地合成。';
 }
 function message(text, error = false) {
   const box = $('message'); box.textContent = text; box.className = error ? 'error' : ''; box.hidden = false;
@@ -45,12 +50,15 @@ function showLogin() {
   revision = ''; $('issued').hidden = true; $('expires').textContent = '';
   for (const id of ['base-url', 'model-name', 'prompt', 'tts-voice', 'voice-url', 'device-id', 'client-id']) $(id).value = '';
   $('tools').replaceChildren(); $('devices').replaceChildren(); $('tool-policy').textContent = '';
+  screenGeneration++; showScreen(null);
 }
 function draft() {
   return { revision, base_url: $('base-url').value.trim(), model_name: $('model-name').value.trim(),
     api_key: $('api-key').value.trim(), clear_api_key: $('clear-key').checked,
     prompt: $('prompt').value, context_turns:Number($('context-turns').value),tts_voice: $('tts-voice').value.trim(),
-    tts_speed: Number($('tts-speed').value || 1.0), tts_provider:$('tts-provider').value, tool_calling: $('tool-calling').checked };
+    tts_speed: Number($('tts-speed').value || 1.0), tts_provider:$('tts-provider').value, breeze_voice:$('breeze-voice').value, tool_calling: $('tool-calling').checked,
+    ui_confirm_dangerous: $('ui-confirm').checked, continuous_chat: $('continuous-chat').checked,
+    continuous_follow_up_s: Number($('follow-up-s').value || 8) };
 }
 function invalidateConnection() {
   if(connectionProfile) message('设备信息已改变，旧连接配置已收起，请重新生成。');
@@ -65,7 +73,13 @@ async function loadSettings() {
   $('key-state').textContent = data.api_key_set ? '已保存 · 不回显' : '尚未配置';
   $('api-key').value = ''; $('clear-key').checked = false;
   $('tool-calling').checked = data.tool_calling;
+  $('ui-confirm').checked = data.ui_confirm_dangerous !== false;
+  $('continuous-chat').checked = !!data.continuous_chat; $('follow-up-s').value = data.continuous_follow_up_s ?? 8;
   $('asr-name').textContent = data.asr; $('tts-name').textContent = data.tts;
+  breezeKeySet=!!data.breeze_key_set;
+  const bv=$('breeze-voice');
+  if(data.breeze_voice && ![...bv.options].some(o=>o.value===data.breeze_voice)) bv.add(new Option(data.breeze_voice,data.breeze_voice));
+  bv.value=data.breeze_voice||'clever';
   $('tts-provider').value=data.tts_provider||data.tts||'EdgeTTS';refreshTts();
   $('context-turns').value=data.context_turns??6;
   $('tool-policy').textContent = data.tool_policy; $('tools').replaceChildren();
@@ -108,7 +122,111 @@ async function status() {
     const sample=document.createElement('a');sample.href='/api/tts-stream-test/audio';sample.textContent='下载最近一次测试的音频样本';row.append(sample);
     $('devices').append(row);
   }
+  updateScreenDevices(data.devices);
+  if(!$('device-panel').hidden) await loadScreen();
   if(!$('history-panel').hidden && !historyCursor) await loadHistory();
+}
+function updateScreenDevices(devices) {
+  const select=$('screen-device'), current=select.value;
+  const ids=[...new Set(devices.map(item=>item.device_id).filter(Boolean))];
+  const existing=[...select.options].map(o=>o.value).filter(Boolean);
+  if(ids.join('\n')===existing.join('\n')) return;
+  select.replaceChildren();
+  if(!ids.length) select.append(new Option('暂无语音连接',''));
+  for(const id of ids) select.append(new Option(id,id));
+  select.value=ids.includes(current)?current:(ids[0]||'');
+  screenGeneration++; showScreen(null);
+}
+function showScreen(data) {
+  const image=$('screen-image');
+  if(data && data.png) { image.src='data:image/png;base64,'+data.png; image.hidden=false; $('screen-empty').hidden=true; }
+  else { image.removeAttribute('src'); image.hidden=true; $('screen-empty').hidden=false;
+    $('screen-empty').textContent=$('screen-device').value?'还没有截图。点“刷新屏幕”读取一帧（需要配套的 ESP32 固件）。':'设备建立语音连接后，这里显示 Flipper 屏幕。'; }
+  const parts=[];
+  if(data) {
+    parts.push(data.app?`当前应用：${data.app}`:(data.time?'当前在主页':''));
+    if(data.locked) parts.push('已锁屏');
+    if(data.selected) parts.push(`选中：${data.selected}`);
+    if(data.png_time) parts.push(`截图时间：${new Date(data.png_time*1000).toLocaleTimeString()}`);
+  }
+  $('screen-meta').textContent=parts.filter(Boolean).join(' · ');
+  $('screen-view').textContent=data&&data.view?data.view:''; $('screen-view').hidden=!(data&&data.view);
+}
+async function loadScreen() {
+  const device=$('screen-device').value;
+  if(!device || screenLoading) return;
+  const generation=screenGeneration; screenLoading=true;
+  try {
+    const data=await api('/api/flipper-screen?device='+encodeURIComponent(device));
+    if(generation===screenGeneration && device===$('screen-device').value && !$('console').hidden) showScreen(data);
+  } catch { /* 设备刚断开：等下一次状态刷新 */ }
+  finally { screenLoading=false; }
+}
+$('screen-device').addEventListener('change',()=>{screenGeneration++;showScreen(null);loadScreen();});
+$('screen-refresh').addEventListener('click',()=>busy($('screen-refresh'),async()=>{
+  const device=$('screen-device').value;
+  if(!device) throw new Error('请先让设备建立语音连接');
+  const generation=++screenGeneration;
+  const data=await api('/api/flipper-screen/refresh',{method:'POST',body:{device_id:device}});
+  if(generation===screenGeneration && device===$('screen-device').value) showScreen(data);
+  message('已读取 Flipper 屏幕。');
+}));
+const TOOL_LABELS = {
+  flipper_app_open:'打开应用', flipper_app_exit:'退出应用', flipper_press_keys:'按键', flipper_press_button:'按键',
+  flipper_ui_select:'选择', flipper_screen:'看屏幕', flipper_go_home:'回主页', flipper_nfc_read:'读 NFC',
+  flipper_nfc_scan:'检测 NFC', flipper_infrared_learn:'学红外', flipper_subghz_record:'录射频', flipper_run_saved:'运行文件',
+  flipper_app_call:'调用应用动作', flipper_app_describe:'查询应用动作', flipper_app_catalog:'列出应用',
+  flipper_list_files:'浏览文件', flipper_list_apps:'列出应用', flipper_read_file:'读文件', flipper_alert:'提示音',
+  sing_song:'点歌', list_songs:'查曲库', flipper_get_status:'查状态', flipper_system_info:'查设备信息',
+};
+const NOISY_STATUS = ['正在生成回复／语音','服务端语音发送结束','开始录音','收到录音发送请求，正在识别'];
+let historyOpen = new Set();
+function node(tag, className, text) {
+  const item=document.createElement(tag); if(className) item.className=className;
+  if(text!==undefined) item.textContent=text; return item;
+}
+function toolCard(event, data) {
+  const row=node('article','history-event tool'); const args=data.args||{};
+  const meta=node('small',undefined,`${new Date(event.time*1000).toLocaleTimeString()} · 操作`);
+  const card=node('div','tool-card');
+  const head=node('div','tool-head');
+  const detail=args.name||args.text||args.keys||args.key||args.song||args.path||args.action||args.kind||args.url||'';
+  head.append(node('b',undefined,TOOL_LABELS[data.name]||data.name||'工具'));
+  if(detail) head.append(node('code',undefined,String(detail)));
+  const state=data.code==='needs_confirmation'?['等待确认','warn']:data.ok===false||(data.code&&data.code!=='ok')?[data.code||'失败','bad']:['完成','good'];
+  head.append(node('span','tool-state '+state[1],state[0]));
+  card.append(head);
+  if(data.app!==undefined || data.selected) card.append(node('small','tool-where',`${data.app?'应用 '+data.app:'主页'}${data.selected?' · 选中 '+data.selected:''}${data.action?' · '+data.action:''}`));
+  if(data.image) {
+    const img=node('img','tool-shot'); img.alt='当时的 Flipper 屏幕'; img.loading='lazy';
+    img.src='/api/history/image?name='+encodeURIComponent(data.image); card.append(img);
+  }
+  const text=data.view||data.result;
+  if(text) {
+    const more=node('details'); const key=String(event.id); more.open=historyOpen.has(key);
+    more.addEventListener('toggle',()=>{ if(more.open) historyOpen.add(key); else historyOpen.delete(key); });
+    more.append(node('summary',undefined,data.view?'屏幕文字':'返回结果'), node('pre',undefined,text)); card.append(more);
+  }
+  row.append(meta,card); return row;
+}
+function renderHistory(events) {
+  const box=$('history-events'); const verbose=!!$('history-verbose').checked;
+  let session='';
+  for(const event of events) {
+    if(event.session && event.session!==session) {
+      if(session) box.append(node('div','history-divider','新的语音会话 · '+new Date(event.time*1000).toLocaleString()));
+      session=event.session;
+    }
+    if(event.kind==='status' && !verbose && NOISY_STATUS.includes(event.text)) continue;
+    if(event.kind==='tool') {
+      let data=null; try { data=JSON.parse(event.text); } catch { data=null; }
+      if(data && typeof data==='object') { box.append(toolCard(event,data)); continue; }
+    }
+    const who={user:'你',assistant:'鲸鱼娘',status:'状态',error:'错误',tool:'操作'}[event.kind]||event.kind;
+    const row=node('article','history-event '+event.kind);
+    const meta=node('small',undefined,`${new Date(event.time*1000).toLocaleTimeString()} · ${who}${event.device&&!$('history-device').value?' · '+event.device:''}`);
+    row.append(meta,node('div','bubble',event.text)); box.append(row);
+  }
 }
 async function loadHistory(before=0) {
   if(historyLoading || historyClearRequest) return;
@@ -123,11 +241,7 @@ async function loadHistory(before=0) {
       const option=document.createElement('option');option.value=value;option.textContent=value||'未标识设备';$('history-device').append(option);
     }
     $('history-events').replaceChildren();
-    for(const event of data.events) {
-      const row=document.createElement('article');row.className='history-event '+event.kind;
-      const meta=document.createElement('small');meta.textContent=`${new Date(event.time*1000).toLocaleString()} · ${event.device} · ${{user:'你',assistant:'鲸鱼娘',status:'状态',error:'错误'}[event.kind]||event.kind}`;
-      const text=document.createElement('div');text.textContent=event.text;row.append(meta,text);$('history-events').append(row);
-    }
+    renderHistory(data.events);
     $('history-note').textContent=data.write_error?'记录写入出现异常，请检查服务端数据目录和磁盘。':data.events.length?(before?'正在查看较早记录，点击“查看最新”返回。':'显示最近记录，每 2.5 秒刷新。'):'暂无记录。开始一次对话后，这里会显示识别文字、回复和处理状态。';
     $('history-older').disabled=!historyNext;
   } finally {if(historyLoading===request)historyLoading=false;}
@@ -180,12 +294,70 @@ $('logout').addEventListener('click', () => busy($('logout'), async () => { awai
 document.querySelectorAll('.tab').forEach(button => button.addEventListener('click', () => {
   document.querySelectorAll('.tab').forEach(tab => tab.classList.toggle('active', tab === button));
   document.querySelectorAll('.panel').forEach(panel => { panel.hidden = panel.id !== button.dataset.panel; });
-  document.querySelector('.save-bar').hidden = ['device-panel','history-panel'].includes(button.dataset.panel);
+  document.querySelector('.save-bar').hidden = ['device-panel','history-panel','singing-panel'].includes(button.dataset.panel);
   if(button.dataset.panel==='history-panel') loadHistory(historyCursor).catch(error=>message(error.message,true));
+  if(button.dataset.panel==='device-panel') loadScreen();
+  if(button.dataset.panel==='singing-panel') loadSinging().catch(error=>message(error.message,true));
+}));
+let singingDownload = '', singingTimer = null;
+function el(tag, text, className) { const node=document.createElement(tag); if(text!==undefined) node.textContent=text; if(className) node.className=className; return node; }
+async function loadSinging() {
+  const data = await api('/api/singing');
+  const health = data.health || {};
+  $('singing-status').textContent = !data.enabled ? '唱歌功能在语音服务配置里关闭了（singing.enabled: false）。'
+    : !data.online ? (data.error || '连不上唱歌服务。')
+    : `已连接 · ${health.gpu?.name || '未检测到显卡'} · 音色模型${health.model_ready ? '就绪' : '缺失'} · 排队 ${health.queue ?? 0} 首`
+      + ` · 链接下载${health.yt_dlp ? '可用' : '未安装 yt-dlp'}` + (data.error ? ` · ${data.error}` : '');
+  $('singing-status').className = 'note' + (data.online ? '' : ' error');
+  const config = data.config;
+  ['songs-dirs','download-dir','cache-dir','singing-save','song-url','song-title','song-download'].forEach(id => { $(id).disabled = !config; });
+  if (config) {
+    if (document.activeElement !== $('songs-dirs')) $('songs-dirs').value = config.songs_dirs.join('\n');
+    if (document.activeElement !== $('download-dir')) $('download-dir').value = config.download_dir || '';
+    if (document.activeElement !== $('cache-dir')) $('cache-dir').value = config.cache_dir || '';
+  }
+  const library = $('library'); library.replaceChildren();
+  const songs = data.songs?.songs || [], renders = data.songs?.renders || [];
+  const ready = new Set(renders.map(r => r.title));
+  $('library-note').textContent = data.songs ? `原曲 ${songs.length} 首，练好的翻唱 ${renders.length} 份。` : '曲库读取失败。';
+  songs.slice(0, 300).forEach(song => {
+    const row = el('div', undefined, 'tool');
+    row.append(el('code', song.title));
+    if (ready.has(song.title)) row.append(el('span', ' 已练好', 'badge ready'));
+    row.append(el('small', ` ${song.dir ? song.dir + ' · ' : ''}${song.file}`));
+    library.append(row);
+  });
+}
+async function pollSingingDownload() {
+  clearTimeout(singingTimer);
+  if (!singingDownload) return;
+  const state = await api(`/api/singing/download?id=${singingDownload}`);
+  const render = state.render || {};
+  const stage = state.state === 'error' ? `下载失败：${state.error}`
+    : state.state !== 'done' ? `下载中 ${Math.round((state.progress || 0) * 100)}%…`
+    : render.state === 'done' ? `《${state.title}》已练好。` : render.state === 'error' ? `《${state.title}》没练成：${render.error || ''}`
+    : `《${state.title}》已下载，正在练（${render.stage || render.state || '排队'} ${Math.round((render.progress || 0) * 100)}%）…`;
+  $('download-state').textContent = stage;
+  const finished = state.state === 'error' || (state.state === 'done' && ['done','error'].includes(render.state || 'done'));
+  if (finished) { singingDownload = ''; loadSinging().catch(() => {}); return; }
+  singingTimer = setTimeout(() => pollSingingDownload().catch(error => { $('download-state').textContent = error.message; }), 2000);
+}
+$('singing-refresh').addEventListener('click', () => busy($('singing-refresh'), () => loadSinging()));
+$('singing-save').addEventListener('click', () => busy($('singing-save'), async () => {
+  await api('/api/singing/config', { method: 'POST', body: { songs_dirs: $('songs-dirs').value,
+    download_dir: $('download-dir').value.trim(), cache_dir: $('cache-dir').value.trim() } });
+  await loadSinging(); message('唱歌路径已保存，立即生效。');
+}));
+$('song-download').addEventListener('click', () => busy($('song-download'), async () => {
+  const result = await api('/api/singing/download', { method: 'POST', body: { url: $('song-url').value.trim(), title: $('song-title').value.trim() } });
+  singingDownload = result.download_id; $('song-url').value = ''; $('song-title').value = '';
+  message(result.announce ? '已开始下载。练好后鲸鱼娘会在设备上问你要不要听。' : '已开始下载。现在没有设备连着，练好后直接对鲸鱼娘点这首歌就行。');
+  await pollSingingDownload();
 }));
 $('history-device').addEventListener('change',()=>{historyGeneration++;historyLoading=false;historyCursor=historyNext=0;historyControls(false);loadHistory().catch(error=>message(error.message,true));});
 $('history-clear').addEventListener('click',()=>clearHistory().catch(error=>message(error.message,true)));
 $('history-refresh').addEventListener('click',()=>busy($('history-refresh'),()=>loadHistory()));
+$('history-verbose').addEventListener('change',()=>loadHistory(historyCursor).catch(error=>message(error.message,true)));
 $('history-older').addEventListener('click',()=>busy($('history-older'),()=>loadHistory(historyNext)));
 $('save').addEventListener('click', () => busy($('save'), async () => {
   const result = await api('/api/settings', { method: 'POST', body: draft() }); revision = result.revision;
@@ -199,7 +371,7 @@ $('tts-provider').addEventListener('change',refreshTts);
 async function testTts(mode) {
   const generation=++previewGeneration;
   message('正在生成试听音频…');
-  const response=await fetch('/api/tts-test',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({tts_provider:$('tts-provider').value,tts_speed:Number($('tts-speed').value||1.0),preview_mode:mode})});
+  const response=await fetch('/api/tts-test',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({tts_provider:$('tts-provider').value,tts_speed:Number($('tts-speed').value||1.0),breeze_voice:$('breeze-voice').value,preview_mode:mode})});
   if(!response.ok){if(response.status===401)showLogin();const text=await response.text();let error;try{error=JSON.parse(text).error;}catch{error=text;}throw new Error(error||'试听失败');}
   const audio=await response.blob();
   if($('console').hidden || generation!==previewGeneration)return;

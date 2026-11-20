@@ -69,6 +69,9 @@ private:
     int64_t native_deadline_ms_ = 0;
     bool rpc_app_running_ = false;
     std::string rpc_app_name_;
+    std::string retained_app_;
+    int64_t retained_deadline_ms_ = 0;
+    std::atomic<bool> retained_active_{false};
     TaskHandle_t task_ = nullptr;
     bool status_received_ = false, status_ok_ = false;
     bool discovery_received_ = false;
@@ -98,7 +101,11 @@ private:
     bool WaitStatus(int timeout_ms);
     void FailLink(const char* reason);
     bool Connect();
-    std::string Call(const std::string& request);
+    std::string Call(const std::string& request, int timeout_ms = 500);
+    // Screen readback waits for a Flipper GUI redraw (up to ~400 ms there).
+    std::string Companion(const std::string& request, int timeout_ms) override {
+        return Call(request, timeout_ms);
+    }
     bool SendWire(const std::vector<uint8_t>& wire);
     NativeReply Native(uint32_t tag, const std::vector<uint8_t>& payload = {},
                        std::function<bool(const dfwire::Message&)> sink = {}, bool cleanup = false,
@@ -111,6 +118,13 @@ private:
     bool AppRunning() const override { return rpc_app_running_; }
     std::string AppName() const override { return rpc_app_name_; }
     void SetAppName(const std::string& name) override { rpc_app_name_ = name; }
+    std::string RetainedApp() const override { return retained_app_; }
+    int64_t RetainedDeadline() const override { return retained_deadline_ms_; }
+    void RetainApp(const std::string& name, int64_t deadline) override {
+        retained_app_ = name;
+        retained_deadline_ms_ = deadline;
+        retained_active_ = !name.empty();
+    }
     std::string ExecuteNative(const JobEntry& job);
     void Run();
     void ApplyCommand(const std::string& command);

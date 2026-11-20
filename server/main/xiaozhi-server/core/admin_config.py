@@ -2,6 +2,7 @@
 import hashlib
 import os
 from pathlib import Path
+import re
 import tempfile
 from urllib.parse import urlsplit
 
@@ -14,6 +15,15 @@ from core.tts_settings import LOCAL_TTS
 
 class ConfigConflict(ValueError):
     pass
+
+
+TTS_PROVIDERS = ('LocalTTS', 'EdgeTTS', 'BreezeTTS')
+
+
+def breeze_voice(value):
+    if not isinstance(value, str) or not (value in ('clever', 'dreamy') or re.fullmatch(r'voc_[a-z0-9]{6,40}', value)):
+        raise ValueError('BreezeTTS 音色应为 clever、dreamy 或 voc_ 开头的 ID')
+    return value
 
 
 def configured(value):
@@ -66,7 +76,13 @@ class AdminConfig:
             'tts_provider': selected.get('TTS', 'EdgeTTS'),
             'tts_speed': float(config.get('TTS', {}).get('LocalTTS', {}).get('speed', 1.0)),
             'context_turns': config.get('context_turns',6),
+            'ui_confirm_dangerous': config.get('ui_confirm_dangerous', True) is not False,
+            'continuous_chat': config.get('continuous_chat', False) is True,
+            'continuous_follow_up_s': config.get('continuous_follow_up_s', 8),
             'tts_voice': config.get('TTS', {}).get('EdgeTTS', {}).get('voice', 'zh-CN-XiaoxiaoNeural'),
+            'breeze_voice': str(config.get('TTS', {}).get('BreezeTTS', {}).get('voice_id', 'clever')),
+            'breeze_key_set': configured(os.environ.get('BREEZE_API_KEY')) or configured(
+                config.get('TTS', {}).get('BreezeTTS', {}).get('api_key')),
             'websocket': config.get('server', {}).get('websocket', ''),
         }
 
@@ -102,8 +118,8 @@ class AdminConfig:
             raise ValueError('系统提示词不能为空，最多 16000 字符')
         voice = text(payload.get('tts_voice', self.public()['tts_voice']), '音色', 128)
         tts_provider = payload.get('tts_provider', merged.get('selected_module', {}).get('TTS', 'EdgeTTS'))
-        if tts_provider not in ('LocalTTS', 'EdgeTTS'):
-            raise ValueError('请选择本地合成或 EdgeTTS')
+        if tts_provider not in TTS_PROVIDERS:
+            raise ValueError('请选择本地合成、EdgeTTS 或 BreezeTTS')
         provider = merged.get('selected_module', {}).get('LLM', 'DeepFlipperLLM')
         old = merged.get('LLM', {}).get(provider, {})
         if old.get('type', 'openai') != 'openai':
@@ -130,7 +146,22 @@ class AdminConfig:
         if type(context_turns) is not int or not 0<=context_turns<=12:
             raise ValueError('重连上下文轮数应为 0–12')
         custom['context_turns']=context_turns
+        if 'continuous_chat' in payload:
+            if not isinstance(payload['continuous_chat'], bool):
+                raise ValueError('连续对话选项应为布尔值')
+            custom['continuous_chat'] = payload['continuous_chat']
+        if 'continuous_follow_up_s' in payload:
+            value = payload['continuous_follow_up_s']
+            if type(value) not in (int, float) or not 3 <= value <= 30:
+                raise ValueError('连续对话等待时间应为 3–30 秒')
+            custom['continuous_follow_up_s'] = value
+        if 'ui_confirm_dangerous' in payload:
+            if not isinstance(payload['ui_confirm_dangerous'], bool):
+                raise ValueError('危险操作确认选项应为布尔值')
+            custom['ui_confirm_dangerous'] = payload['ui_confirm_dangerous']
         custom.setdefault('TTS', {}).setdefault('EdgeTTS', {})['voice'] = voice
+        if 'breeze_voice' in payload:
+            custom['TTS'].setdefault('BreezeTTS', {})['voice_id'] = breeze_voice(payload['breeze_voice'])
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd, temporary = tempfile.mkstemp(prefix='.admin-', suffix='.yaml', dir=self.path.parent)
         try:
