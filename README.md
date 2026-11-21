@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/branding/deepflipper-logo.png" width="380" alt="DeepFlipper Logo：鲸鱼娘抱着 Flipper 海豚">
+  <img src="assets/branding/deepflipper-logo.png" width="150" alt="DeepFlipper Logo：鲸鱼娘抱着 Flipper 海豚">
 </p>
 
 <h1 align="center">DeepFlipper</h1>
